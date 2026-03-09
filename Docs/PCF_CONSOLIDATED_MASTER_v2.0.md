@@ -864,7 +864,7 @@ The Config tab controls how `<SUPPORT_NAME>` and `<SUPPORT_GUID>` are derived fr
 ```python
 def resolve_support(friction, gap, node_name, config):
     guid = f"UCI:{node_name}"  # Prefix always "UCI:"
-    
+
     if (friction is None or friction == "" or friction == 0.3) and (gap is None or gap == ""):
         name = "ANC"
     elif friction == 0.15:
@@ -873,7 +873,7 @@ def resolve_support(friction, gap, node_name, config):
         name = "RST"
     else:
         name = config.support_fallback_name  # default "RST"
-    
+
     return name, guid
 ```
 
@@ -945,20 +945,20 @@ def fuzzy_match_header(header_text, alias_config, threshold=0.75):
     Returns: canonical_name or None
     """
     norm_header = normalize(header_text)
-    
+
     # Pass 1: Exact match on normalized aliases
     for canonical, aliases in alias_config.items():
         for alias in aliases:
             if normalize(alias) == norm_header:
                 return canonical
-    
+
     # Pass 2: Substring containment
     for canonical, aliases in alias_config.items():
         for alias in aliases:
             norm_alias = normalize(alias)
             if norm_alias in norm_header or norm_header in norm_alias:
                 return canonical
-    
+
     # Pass 3: Fuzzy ratio (SequenceMatcher)
     best_match = None
     best_score = 0
@@ -968,7 +968,7 @@ def fuzzy_match_header(header_text, alias_config, threshold=0.75):
             if score > best_score and score >= threshold:
                 best_score = score
                 best_match = canonical
-    
+
     return best_match  # None if no match above threshold
 ```
 
@@ -985,16 +985,16 @@ def ensure_bore_mm(bore_value, unit_hint=None):
     """
     standard_mm = {15,20,25,32,40,50,65,80,90,100,125,150,200,250,300,
                    350,400,450,500,600,750,900,1050,1200}
-    
+
     val = float(bore_value)
-    
+
     if unit_hint == "in" or unit_hint == "inch":
         return val * 25.4
-    
+
     if val <= 48 and val not in standard_mm:
         # Likely inches → convert
         return val * 25.4
-    
+
     return val  # Already mm
 ```
 
@@ -1011,7 +1011,7 @@ def auto_calculate_coordinates(row, prev_ep2=None):
     has_eps = row.EP1 is not None and row.EP2 is not None
     has_deltas = row.DELTA_X is not None  # at least one delta
     has_lens = row.LEN1 is not None or row.LEN2 is not None or row.LEN3 is not None
-    
+
     if has_eps:
         # Path A: Calculate deltas and lens from EPs
         row.DELTA_X = row.EP2.x - row.EP1.x
@@ -1020,7 +1020,7 @@ def auto_calculate_coordinates(row, prev_ep2=None):
         row.LEN1, row.AXIS1 = delta_to_len_axis(row.DELTA_X, "X")
         row.LEN2, row.AXIS2 = delta_to_len_axis(row.DELTA_Y, "Y")
         row.LEN3, row.AXIS3 = delta_to_len_axis(row.DELTA_Z, "Z")
-    
+
     elif has_deltas:
         # Path B: Calculate EPs and lens from deltas
         row.EP1 = prev_ep2 if prev_ep2 else (0, 0, 0)
@@ -1030,7 +1030,7 @@ def auto_calculate_coordinates(row, prev_ep2=None):
         row.LEN1, row.AXIS1 = delta_to_len_axis(row.DELTA_X, "X")
         row.LEN2, row.AXIS2 = delta_to_len_axis(row.DELTA_Y, "Y")
         row.LEN3, row.AXIS3 = delta_to_len_axis(row.DELTA_Z, "Z")
-    
+
     elif has_lens:
         # Path C: Calculate deltas and EPs from LEN/AXIS
         row.DELTA_X = len_axis_to_delta(row.LEN1, row.AXIS1)
@@ -1063,7 +1063,7 @@ def len_axis_to_delta(length, axis):
 def generate_pcf(data_table, config):
     lines = []
     dec = config.decimals  # 1 or 4
-    
+
     # === HEADER ===
     lines.append("ISOGEN-FILES ISOGEN.FLS")
     lines.append("UNITS-BORE MM")
@@ -1075,15 +1075,15 @@ def generate_pcf(data_table, config):
     lines.append("    PROJECT-IDENTIFIER P1")
     lines.append("    AREA A1")
     lines.append("")
-    
+
     for row in data_table.component_rows():
         comp_type = row.Type.strip().upper()
-        
+
         # MESSAGE-SQUARE for ALL components (including SUPPORT)
         msg = build_message_square(row, comp_type)
         lines.append("MESSAGE-SQUARE  ")
         lines.append(f"    {msg}")
-        
+
         if comp_type == "SUPPORT":
             name, guid = resolve_support(row.friction, row.gap, row.node_name, config)
             lines.append("SUPPORT")
@@ -1092,10 +1092,10 @@ def generate_pcf(data_table, config):
             lines.append(f"    <SUPPORT_GUID>    {guid}")
             lines.append("")
             continue
-        
+
         pcf_kw = map_to_pcf_keyword(comp_type)
         lines.append(pcf_kw)
-        
+
         # GEOMETRY
         if comp_type == "OLET":
             lines.append(f"    CENTRE-POINT  {fmt_coord(row.CP, row.main_bore, dec)}")
@@ -1108,28 +1108,28 @@ def generate_pcf(data_table, config):
                 lines.append(f"    CENTRE-POINT  {fmt_coord(cp, row.bore, dec)}")
             if comp_type == "TEE":
                 lines.append(f"    BRANCH1-POINT {fmt_coord(row.BP, row.branch_bore, dec)}")
-        
+
         # PIPELINE-REFERENCE for PIPE only
         if comp_type == "PIPE" and row.pipeline_ref:
             lines.append(f"    PIPELINE-REFERENCE {row.pipeline_ref}")
-        
+
         if row.skey:
             lines.append(f"    <SKEY>  {row.skey}")
-        
+
         if comp_type == "BEND" and row.angle:
             lines.append(f"    ANGLE  {format_angle(row.angle, config.angleFormat)}")
         if comp_type == "BEND" and row.bend_radius:
             lines.append(f"    BEND-RADIUS  {row.bend_radius}")
         if comp_type == "REDUCER-ECCENTRIC" and row.flat_direction:
             lines.append(f"    FLAT-DIRECTION  {row.flat_direction}")
-        
+
         for ca_num in [1,2,3,4,5,6,7,8,9,10,97,98]:
             val = row.get_ca(ca_num)
             if val is not None and val != "":
                 lines.append(f"    COMPONENT-ATTRIBUTE{ca_num}    {val}")
-        
+
         lines.append("")
-    
+
     return "\r\n".join(lines)
 ```
 
@@ -1317,7 +1317,7 @@ SUPPORT
 def build_message_square(row, comp_type):
     tokens = []
     tokens.append(comp_type)
-    
+
     if comp_type == "SUPPORT":
         # SUPPORT: no Material, Length, Direction
         ref = row.CA97 or row.REF_NO or ""
@@ -1327,27 +1327,27 @@ def build_message_square(row, comp_type):
         if row.support_name: tokens.append(row.support_name)
         if row.support_guid: tokens.append(row.support_guid)
         return ", ".join(tokens)
-    
+
     # Non-SUPPORT components
     if row.CA3:       tokens.append(row.CA3)
-    
+
     length = abs(row.LEN1 or row.LEN2 or row.LEN3 or 0)
     axis = row.AXIS1 or row.AXIS2 or row.AXIS3 or ""
     if length:        tokens.append(f"LENGTH={int(length)}MM")
     if axis:          tokens.append(axis.upper())
-    
+
     ref = row.CA97 or row.REF_NO or ""
     seq = row.CA98 or row.CSV_SEQ_NO or ""
     if ref:           tokens.append(f"RefNo:{ref}")
     if seq:           tokens.append(f"SeqNo:{seq}")
-    
+
     if row.BRLEN:     tokens.append(f"BrLen={int(abs(row.BRLEN))}MM")
-    
+
     if "REDUCER" in comp_type and row.bore_large and row.bore_small:
         tokens.append(f"Bore={row.bore_large}/{row.bore_small}")
-    
+
     if row.CA8:       tokens.append(f"Wt={row.CA8}")
-    
+
     return ", ".join(tokens)
 ```
 
@@ -1459,7 +1459,7 @@ Step 2: MATCH exits to entries
 Step 3: IDENTIFY chain start terminals
   Terminals are components whose EP1 has no incoming connection.
   Typical terminals: first flange, nozzle connection, open pipe end.
-  
+
   Sort terminals by:
     1. Components with SKEY matching nozzle/flange patterns (preferred start)
     2. Components with lowest sequence number
@@ -1491,12 +1491,12 @@ current = start_terminal
 visited = set()
 
 WHILE current is not null AND current.id not in visited:
-  
+
   visited.add(current.id)
-  
+
   // ─── A. DETECT ELEMENT AXIS ───
   elem_axis, elem_dir = detect_element_axis(current)
-  
+
   // ─── B. PRE-RULES: Check element itself ───
   Run element-level rules:
     R-GEO-01: Micro-element check (< 6mm)
@@ -1505,23 +1505,23 @@ WHILE current is not null AND current.id not in visited:
     R-GEO-06: Valve face-to-face check
     R-DAT-01: Coordinate precision consistency
     R-DAT-02: Suspicious round numbers
-  
+
   // ─── C. AXIS CONTINUITY CHECK ───
   IF context.travel_axis is set AND elem_axis is set:
     IF elem_axis != context.travel_axis:
       IF current.type NOT IN (BEND, TEE):
         Flag R-CHN-01: "Axis change without bend"
-  
+
   // ─── D. BORE CONTINUITY CHECK ───
   IF current.bore != context.current_bore:
     IF previous element was NOT a REDUCER:
       Flag R-GEO-02: "Missing reducer"
-  
+
   // ─── E. MATERIAL/DESIGN CONTINUITY ───
   Run continuity rules:
     R-DAT-03: Material continuity
     R-DAT-04: Design condition continuity
-  
+
   // ─── F. UPDATE CONTEXT ───
   IF elem_axis:
     context.travel_axis = elem_axis
@@ -1533,20 +1533,20 @@ WHILE current is not null AND current.id not in visited:
     context.pipe_length_sum += element_length(current)
   IF current.type NOT IN ("PIPE", "SUPPORT"):
     context.last_fitting_type = current.type
-  
+
   // ─── G. FIND NEXT ELEMENT ───
   next = graph.get_next(current)
   gap_vector = null
   IF next:
     gap_vector = next.entry_point - current.exit_point
-  
+
   // ─── H. GAP/OVERLAP ANALYSIS ───
   fix_action = null
   IF gap_vector:
     fix_action = analyze_gap_with_context(
       gap_vector, context, current, next
     )
-  
+
   // ─── I. RECORD CHAIN LINK ───
   chain.append(ChainLink(
     element = current,
@@ -1555,7 +1555,7 @@ WHILE current is not null AND current.id not in visited:
     fix_action = fix_action,
     next_element = next
   ))
-  
+
   // ─── J. BRANCH HANDLING ───
   IF current.type == "TEE":
     branch_start = graph.get_branch(current)
@@ -1566,10 +1566,10 @@ WHILE current is not null AND current.id not in visited:
       branch_context.current_bore = current.branchBore
       branch_context.depth += 1
       branch_context.chain_id = context.chain_id + ".B" + str(branch_count)
-      
+
       branch_chain = walk_chain(branch_start, graph, branch_context)
       chain[-1].branch_chain = branch_chain
-  
+
   // ─── K. ADVANCE ───
   current = next
 
@@ -1614,8 +1614,8 @@ MAIN WALK:
        │
        ▼
   Flange-2 → Flange-3 → END ──────────────────────── R-AGG-04: flange terminal ✓
-  
-  
+
+
 BRANCH WALK (from Tee-1 BP):
 
   context: Z-axis, Up, bore=350, depth=1
@@ -1632,7 +1632,7 @@ BRANCH WALK (from Tee-1 BP):
   Flange-5 (143mm Up) ────────────────────────────── R-TOP-04: paired ✓
        │
        ▼
-  Pipe-5 (150mm Up) → Pipe-6 (150mm Up) ──────────── R-SPA-04: collinear merge? 
+  Pipe-5 (150mm Up) → Pipe-6 (150mm Up) ──────────── R-SPA-04: collinear merge?
        │
        ▼
   Bend-1 (turn Up→West) ──────────────────────────── axis change at bend ✓
@@ -1690,12 +1690,12 @@ IF bore changes AND previous element is NOT REDUCER-CONCENTRIC/ECCENTRIC:
   IF bore change matches a known reducer size pair (config table):
     ACTION: FLAG as missing reducer
     TIER: 4 (error)
-    LOG: "[Error] Row {n}: Bore changes {old}→{new} without reducer. 
+    LOG: "[Error] Row {n}: Bore changes {old}→{new} without reducer.
            Insert REDUCER between Row {n-1} and Row {n}."
   ELSE:
     ACTION: FLAG as data error
     TIER: 4 (error)
-    LOG: "[Error] Row {n}: Unexpected bore change {old}→{new}. 
+    LOG: "[Error] Row {n}: Unexpected bore change {old}→{new}.
            Not a standard reducer size pair."
 ```
 
@@ -1707,21 +1707,21 @@ IF bore changes AND previous element is NOT REDUCER-CONCENTRIC/ECCENTRIC:
 FOR element WHERE type IN (PIPE, FLANGE, VALVE, REDUCER):
   deltas = decompose(EP2 - EP1)
   non_zero_axes = [axis for axis in deltas if abs(delta) > 0.5mm]
-  
+
   IF len(non_zero_axes) > 1:
     dominant = axis with max(abs(delta))
     minor_axes = all other non-zero axes
     total_minor = sum of abs(minor deltas)
-    
+
     IF total_minor < 2.0mm:
       ACTION: SNAP minor axes to zero (align to dominant axis)
       TIER: 2 (auto-fix with log)
-      LOG: "[Fix] Row {n}: {type} had {total_minor:.1f}mm off-axis drift. 
+      LOG: "[Fix] Row {n}: {type} had {total_minor:.1f}mm off-axis drift.
              Snapped to pure {dominant}-axis."
     ELSE:
       ACTION: FLAG as diagonal element
       TIER: 4 (error)
-      LOG: "[Error] Row {n}: {type} runs diagonally across {axes}. 
+      LOG: "[Error] Row {n}: {type} runs diagonally across {axes}.
              Pipes and fittings must align to a single global axis."
 ```
 
@@ -1733,18 +1733,18 @@ FOR element WHERE type IN (PIPE, FLANGE, VALVE, REDUCER):
 FOR element WHERE type IN (FLANGE, VALVE, TEE, BEND, REDUCER):
   measured_length = element_length(element)
   catalog_range = config.catalog_dimensions[type][bore]
-  
+
   IF catalog_range is defined:
     IF measured_length < catalog_range.min * 0.8:
       ACTION: FLAG as undersized
       TIER: 3 (warning)
-      LOG: "[Warning] Row {n}: {type} length {measured}mm is {pct}% below 
+      LOG: "[Warning] Row {n}: {type} length {measured}mm is {pct}% below
              catalog minimum {min}mm for bore {bore}."
-    
+
     IF measured_length > catalog_range.max * 1.2:
       ACTION: FLAG as oversized
       TIER: 3 (warning)
-      LOG: "[Warning] Row {n}: {type} length {measured}mm is {pct}% above 
+      LOG: "[Warning] Row {n}: {type} length {measured}mm is {pct}% above
              catalog maximum {max}mm for bore {bore}."
 ```
 
@@ -1757,22 +1757,22 @@ FOR element WHERE type == "BEND":
   R_measured = distance(CP, EP1)  // should equal distance(CP, EP2)
   R_15D = 1.5 * config.pipe_OD[bore]   // long radius
   R_10D = 1.0 * config.pipe_OD[bore]   // short radius
-  
+
   // Check CP equidistant
   R_to_EP1 = distance(CP, EP1)
   R_to_EP2 = distance(CP, EP2)
   IF abs(R_to_EP1 - R_to_EP2) > 1.0mm:
-    LOG: "[Error] Row {n}: BEND CP not equidistant from EPs. 
+    LOG: "[Error] Row {n}: BEND CP not equidistant from EPs.
            dist(CP,EP1)={R1:.1f}, dist(CP,EP2)={R2:.1f}."
     TIER: 4
-  
+
   // Check against standard radii
   IF abs(R_measured - R_15D) < R_15D * 0.05:
     LOG: "[Info] Row {n}: BEND radius {R:.1f}mm matches 1.5D ({R15:.1f}mm)."
   ELIF abs(R_measured - R_10D) < R_10D * 0.05:
     LOG: "[Info] Row {n}: BEND radius {R:.1f}mm matches 1.0D ({R10:.1f}mm)."
   ELSE:
-    LOG: "[Warning] Row {n}: BEND radius {R:.1f}mm does not match 
+    LOG: "[Warning] Row {n}: BEND radius {R:.1f}mm does not match
            standard 1.5D ({R15:.1f}) or 1.0D ({R10:.1f}). Non-standard bend?"
     TIER: 3
 ```
@@ -1783,9 +1783,9 @@ FOR element WHERE type == "BEND":
 FOR element WHERE type == "VALVE":
   measured_ftf = element_length(element)
   catalog_ftf = config.valve_ftf[skey][bore][class]
-  
+
   IF catalog_ftf is defined AND abs(measured_ftf - catalog_ftf) > catalog_ftf * 0.1:
-    LOG: "[Warning] Row {n}: Valve face-to-face {measured}mm vs catalog {catalog}mm 
+    LOG: "[Warning] Row {n}: Valve face-to-face {measured}mm vs catalog {catalog}mm
            for {skey} bore {bore}. Deviation > 10%."
     TIER: 3
 ```
@@ -1800,7 +1800,7 @@ FOR any element:
     ELIF type == "OLET":
       SKIP (olets use CP/BP, not EPs)
     ELSE:
-      LOG: "[Error] Row {n}: {type} has zero length (EP1 = EP2). 
+      LOG: "[Error] Row {n}: {type} has zero length (EP1 = EP2).
              Coordinate error or duplicate."
       TIER: 4
 ```
@@ -1810,13 +1810,13 @@ FOR any element:
 ```
 FOR any coordinate value (X, Y, or Z) in any EP/CP/BP/COOR:
   IF abs(value) > 500000:
-    LOG: "[Warning] Row {n}: Coordinate magnitude {value:.0f}mm 
+    LOG: "[Warning] Row {n}: Coordinate magnitude {value:.0f}mm
            (={value/1000:.1f}m) seems unusually large. Verify units."
     TIER: 3
-  
+
   IF value == 0.0 and this is the ONLY axis that is zero:
     SKIP (single zero axis is fine)
-  
+
   IF all three spatial values == 0.0:
     LOG: "[Error] Row {n}: Coordinate (0,0,0) — prohibited."
     TIER: 4
@@ -1832,16 +1832,16 @@ FOR any coordinate value (X, Y, or Z) in any EP/CP/BP/COOR:
 AT chain terminal (last element in walk):
   IF element.type == "PIPE":
     // Pipe ending without a fitting = suspicious
-    LOG: "[Warning] Chain {id} ends at bare PIPE (Row {n}). 
+    LOG: "[Warning] Chain {id} ends at bare PIPE (Row {n}).
            Expected terminal fitting (flange, cap, nozzle)."
     TIER: 3
-  
+
   ELIF element.type IN ("FLANGE", "VALVE"):
     LOG: "[Info] Chain {id} terminates at {type} (Row {n}). Normal terminal."
     TIER: — (info only)
-  
+
   ELSE:
-    LOG: "[Warning] Chain {id} ends at {type} (Row {n}). 
+    LOG: "[Warning] Chain {id} ends at {type} (Row {n}).
            Unusual terminal. Verify connection."
     TIER: 3
 ```
@@ -1851,9 +1851,9 @@ AT chain terminal (last element in walk):
 ```
 AFTER all chains are walked:
   orphans = all_components - visited_components
-  
+
   FOR each orphan:
-    LOG: "[Error] Row {n}: {type} is an orphan — not connected to any chain. 
+    LOG: "[Error] Row {n}: {type} is an orphan — not connected to any chain.
            Likely modeling error or missing connection."
     TIER: 4
 ```
@@ -1862,9 +1862,9 @@ AFTER all chains are walked:
 
 ```
 FOR each pair of components (i, j) where i < j:
-  IF same type AND coords_approx_equal(i.EP1, j.EP1, tol=2mm) 
+  IF same type AND coords_approx_equal(i.EP1, j.EP1, tol=2mm)
                 AND coords_approx_equal(i.EP2, j.EP2, tol=2mm):
-    LOG: "[Error] Row {i} and Row {j}: Duplicate {type} elements 
+    LOG: "[Error] Row {i} and Row {j}: Duplicate {type} elements
            occupying same spatial extent. Delete one."
     ACTION: Mark j as candidate for deletion
     TIER: 4 (flag, do not auto-delete — let user choose which)
@@ -1878,16 +1878,16 @@ DURING walk, track flanges:
     // Mid-chain flange — should have a mating flange adjacent
     prev = chain[n-1].element (if exists)
     next = chain[n+1].element (if exists)
-    
+
     IF prev.type != "FLANGE" AND next.type != "FLANGE":
-      LOG: "[Warning] Row {n}: Mid-chain FLANGE has no mating flange. 
+      LOG: "[Warning] Row {n}: Mid-chain FLANGE has no mating flange.
              Flange joints require a pair."
       TIER: 3
-    
+
     IF prev.type == "FLANGE":
       // Verify they are face-to-face (EP2 of prev = EP1 of current, ~0mm gap)
       IF gap > 3mm:
-        LOG: "[Warning] Row {n}: Flange pair gap {gap:.1f}mm. 
+        LOG: "[Warning] Row {n}: Flange pair gap {gap:.1f}mm.
                Expected face-to-face contact."
         TIER: 3
 ```
@@ -1899,14 +1899,14 @@ DURING walk:
   IF current.type == "VALVE" AND current.skey starts with "VB" (flanged valve):
     prev = previous non-pipe element in chain (skip pipes)
     next = next non-pipe element in chain (skip pipes)
-    
+
     IF prev.type != "FLANGE":
-      LOG: "[Warning] Row {n}: Flanged valve ({skey}) has no upstream flange. 
+      LOG: "[Warning] Row {n}: Flanged valve ({skey}) has no upstream flange.
              Expected flange before flanged valve."
       TIER: 3
-    
+
     IF next.type != "FLANGE":
-      LOG: "[Warning] Row {n}: Flanged valve ({skey}) has no downstream flange. 
+      LOG: "[Warning] Row {n}: Flanged valve ({skey}) has no downstream flange.
              Expected flange after flanged valve."
       TIER: 3
 ```
@@ -1919,15 +1919,15 @@ FOR each SUPPORT in the chain:
     - Search adjacent pipes in the chain
     - Project support CO-ORDS onto pipe axis (EP1→EP2 line)
     - Calculate perpendicular distance from support to pipe axis
-  
+
   IF perpendicular_distance > 5mm:
-    LOG: "[Error] Row {n}: SUPPORT is {dist:.1f}mm off the pipe axis. 
+    LOG: "[Error] Row {n}: SUPPORT is {dist:.1f}mm off the pipe axis.
            Support must lie on or near a pipe."
     TIER: 4
-  
+
   // Check if support falls between pipe EP1 and EP2 (not outside)
   IF projection_parameter < 0 OR projection_parameter > 1:
-    LOG: "[Warning] Row {n}: SUPPORT projects outside the adjacent pipe extent. 
+    LOG: "[Warning] Row {n}: SUPPORT projects outside the adjacent pipe extent.
            Verify support location."
     TIER: 3
 ```
@@ -1938,14 +1938,14 @@ FOR each SUPPORT in the chain:
 FOR each TEE:
   // CP must lie on EP1→EP2 segment
   t = project_point_onto_line(CP, EP1, EP2)
-  
+
   IF t < -0.01 OR t > 1.01:
-    LOG: "[Error] Row {n}: TEE centre-point is outside the header 
+    LOG: "[Error] Row {n}: TEE centre-point is outside the header
            EP1→EP2 segment (t={t:.3f}). CP must lie between EP1 and EP2."
     TIER: 4
-  
+
   IF abs(t - 0.5) > 0.02:
-    LOG: "[Warning] Row {n}: TEE centre-point is not at midpoint 
+    LOG: "[Warning] Row {n}: TEE centre-point is not at midpoint
            (t={t:.3f}, expected 0.5). Standard tees have CP at centre."
     TIER: 3
 ```
@@ -1959,8 +1959,8 @@ FOR each TEE:
 ```
 DURING walk, when travel_axis changes:
   IF causing element is NOT BEND and NOT TEE branch entry:
-    LOG: "[Error] Row {n}: Travel axis changed from {old_axis} to {new_axis} 
-           at {type}. Only BENDs and TEE branches can change axis. 
+    LOG: "[Error] Row {n}: Travel axis changed from {old_axis} to {new_axis}
+           at {type}. Only BENDs and TEE branches can change axis.
            Missing BEND between Row {n-1} and Row {n}?"
     TIER: 4
 ```
@@ -1973,28 +1973,28 @@ DURING walk, when travel_axis changes:
 DURING walk:
   IF context.travel_axis == elem_axis AND context.travel_direction != elem_dir:
     // Same axis, reversed direction = fold-back
-    
+
     IF current.type == "PIPE":
       fold_length = element_length(current)
       IF fold_length < 25mm:
         ACTION: DELETE fold-back pipe
         TIER: 2 (auto-fix with log)
-        LOG: "[Fix] Row {n}: Fold-back pipe ({fold_length:.1f}mm) on 
+        LOG: "[Fix] Row {n}: Fold-back pipe ({fold_length:.1f}mm) on
                {axis}-axis deleted."
       ELSE:
         ACTION: FLAG for review
         TIER: 4 (error)
-        LOG: "[Error] Row {n}: Pipe folds back {fold_length:.1f}mm on 
+        LOG: "[Error] Row {n}: Pipe folds back {fold_length:.1f}mm on
                {axis}-axis. Too large to auto-delete. Manual review needed."
-    
+
     ELIF current.type == "BEND":
       // 180° return bend — check if intentional
-      LOG: "[Info] Row {n}: 180° return bend detected on {axis}-axis. 
+      LOG: "[Info] Row {n}: 180° return bend detected on {axis}-axis.
              Verify this is intentional (U-bend / expansion loop)."
       TIER: — (info)
-    
+
     ELSE:
-      LOG: "[Error] Row {n}: {type} reverses direction on {axis}-axis. 
+      LOG: "[Error] Row {n}: {type} reverses direction on {axis}-axis.
              Fittings cannot fold back."
       TIER: 4
 ```
@@ -2007,13 +2007,13 @@ DURING walk:
     // Two bends with no pipe between them
     prev_bend = find_previous_bend(chain)
     pipe_between = total_pipe_length_between(prev_bend, current)
-    
+
     IF pipe_between == 0:
-      LOG: "[Warning] Row {n}: Two adjacent bends with no pipe between them. 
+      LOG: "[Warning] Row {n}: Two adjacent bends with no pipe between them.
              Compound bend or modeling error? Verify."
       TIER: 3
     ELIF pipe_between < 1.0 * config.pipe_OD[bore]:
-      LOG: "[Warning] Row {n}: Only {pipe_between:.0f}mm pipe between bends. 
+      LOG: "[Warning] Row {n}: Only {pipe_between:.0f}mm pipe between bends.
              Minimum tangent for stress analysis may not be met."
       TIER: 3
 ```
@@ -2023,14 +2023,14 @@ DURING walk:
 ```
 DURING walk:
   IF current.csvSeqNo < previous.csvSeqNo AND both are valid numbers:
-    LOG: "[Info] Row {n}: Sequence number {curr_seq} is less than 
+    LOG: "[Info] Row {n}: Sequence number {curr_seq} is less than
            previous {prev_seq}. Data ordering may not match routing direction."
     TIER: — (info)
-    
+
     // Count total reversals in chain
     AT end of chain:
     IF reversal_count > chain_length * 0.3:
-      LOG: "[Warning] Chain {id}: {pct}% of sequence numbers are out of order. 
+      LOG: "[Warning] Chain {id}: {pct}% of sequence numbers are out of order.
              Consider re-sequencing to match routing direction."
       TIER: 3
 ```
@@ -2040,21 +2040,21 @@ DURING walk:
 ```
 DURING walk on a horizontal run (travel_axis = X or Y):
   Track Z values across consecutive elements.
-  
+
   IF all Z values in the last N elements are within 2mm of each other:
     // Stable horizontal run — check for drift
     median_Z = median of recent Z values
-    
+
     IF abs(current.ep1.z - median_Z) > 2mm AND abs(current.ep1.z - median_Z) < 10mm:
       // Small drift — snap to median
       ACTION: SNAP Z to median_Z
       TIER: 2 (auto-fix with log)
-      LOG: "[Fix] Row {n}: Z drifted to {z:.1f} (median {med:.1f}). 
+      LOG: "[Fix] Row {n}: Z drifted to {z:.1f} (median {med:.1f}).
              Snapped to {med:.1f} for horizontal run consistency."
-    
+
     ELIF abs(current.ep1.z - median_Z) >= 10mm:
       // Large Z change in a horizontal run — intentional slope or error?
-      LOG: "[Warning] Row {n}: Z changes by {delta:.1f}mm in horizontal run. 
+      LOG: "[Warning] Row {n}: Z changes by {delta:.1f}mm in horizontal run.
              Intentional slope or elevation error?"
       TIER: 3
 ```
@@ -2065,30 +2065,30 @@ DURING walk on a horizontal run (travel_axis = X or Y):
 FOR two consecutive elements on the same travel_axis:
   // The two non-travel coordinates should match exactly.
   // E.g., if travelling along Y, then X and Z should be identical.
-  
+
   non_travel_axes = axes other than travel_axis
-  
+
   FOR each non_travel_axis:
     val_prev = previous.exit_point[axis]
     val_curr = current.entry_point[axis]
     drift = abs(val_curr - val_prev)
-    
+
     IF drift > 0.1mm AND drift < 2.0mm:
       ACTION: SNAP to previous value
       TIER: 1 (auto-fix silently)
-      LOG: "[Fix] Row {n}: {axis} drifted {drift:.1f}mm on shared axis. 
+      LOG: "[Fix] Row {n}: {axis} drifted {drift:.1f}mm on shared axis.
              Snapped to {val_prev:.1f}."
-    
+
     ELIF drift >= 2.0mm AND drift < 10.0mm:
       ACTION: SNAP with warning
       TIER: 2 (auto-fix with log)
-      LOG: "[Fix] Row {n}: {axis} drifted {drift:.1f}mm. Snapped to {val_prev:.1f}. 
+      LOG: "[Fix] Row {n}: {axis} drifted {drift:.1f}mm. Snapped to {val_prev:.1f}.
              Verify this is not an intentional offset."
-    
+
     ELIF drift >= 10.0mm:
       ACTION: FLAG — do not auto-fix
       TIER: 4 (error)
-      LOG: "[Error] Row {n}: {axis} offset {drift:.1f}mm from previous element. 
+      LOG: "[Error] Row {n}: {axis} offset {drift:.1f}mm from previous element.
              Too large for auto-snap. Lateral offset or data error."
 ```
 
@@ -2117,13 +2117,13 @@ gap_axes = decompose(gap_vector, threshold=0.5mm)
 
 IF len(gap_axes) == 1 AND gap_axes[0].axis == context.travel_axis:
   gap_delta = gap_axes[0].delta
-  
+
   IF abs(gap_delta) <= 25.0mm:
     IF gap_delta * context.travel_direction > 0:
       // Gap in travel direction — insert filler pipe
       ACTION: GAP_FILL_AUTO
       TIER: 2 (auto-fix with log)
-      LOG: "[Fix] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along 
+      LOG: "[Fix] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along
              {axis}-axis {direction}. Filled with pipe."
     ELSE:
       // Gap in reverse direction — this IS an overlap (see R-OVR rules)
@@ -2137,13 +2137,13 @@ IF len(gap_axes) == 1 AND gap_axes[0].axis == context.travel_axis:
   IF abs(gap_delta) > 25.0mm AND abs(gap_delta) <= 100.0mm:
     ACTION: FLAG for review, suggest pipe fill
     TIER: 3 (warning)
-    LOG: "[Warning] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along 
+    LOG: "[Warning] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along
            {axis}-axis. Exceeds 25mm auto-fill. Fill with pipe? (manual confirm)"
-  
+
   IF abs(gap_delta) > 100.0mm:
     ACTION: FLAG as major gap
     TIER: 4 (error)
-    LOG: "[Error] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along 
+    LOG: "[Error] Row {n}→{n+1}: {abs(gap_delta):.1f}mm gap along
            {axis}-axis. Major gap — likely missing component(s)."
 ```
 
@@ -2153,16 +2153,16 @@ IF len(gap_axes) == 1 AND gap_axes[0].axis == context.travel_axis:
 IF len(gap_axes) == 1 AND gap_axes[0].axis != context.travel_axis:
   // Lateral offset — pipe has shifted sideways
   lateral_delta = abs(gap_axes[0].delta)
-  
+
   IF lateral_delta < 2.0mm:
     ACTION: SNAP (align coordinates)
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n}→{n+1}: Lateral offset {lateral_delta:.1f}mm on 
+    LOG: "[Fix] Row {n}→{n+1}: Lateral offset {lateral_delta:.1f}mm on
            {axis}-axis (travel is {travel_axis}). Snapped to align."
   ELSE:
     ACTION: FLAG — lateral shift
     TIER: 4 (error)
-    LOG: "[Error] Row {n}→{n+1}: Lateral offset {lateral_delta:.1f}mm on 
+    LOG: "[Error] Row {n}→{n+1}: Lateral offset {lateral_delta:.1f}mm on
            {axis}-axis. Pipe has shifted sideways. Manual review required."
 ```
 
@@ -2172,12 +2172,12 @@ IF len(gap_axes) == 1 AND gap_axes[0].axis != context.travel_axis:
 IF len(gap_axes) >= 2:
   along_travel = component of gap along context.travel_axis
   lateral_total = sum of abs(components on other axes)
-  
+
   IF lateral_total < 2.0mm AND abs(along_travel) <= 25.0mm:
     // Lateral is noise, treat as pure axial gap
     ACTION: GAP_FILL_AUTO + SNAP lateral
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n}→{n+1}: Multi-axis gap (axial={along:.1f}mm, 
+    LOG: "[Fix] Row {n}→{n+1}: Multi-axis gap (axial={along:.1f}mm,
            lateral={lat:.1f}mm). Lateral snapped, axial filled with pipe."
 ```
 
@@ -2188,7 +2188,7 @@ IF len(gap_axes) >= 2:
   IF lateral_total >= 2.0mm OR abs(along_travel) > 25.0mm:
     ACTION: FLAG — rigorous check required
     TIER: 4 (error)
-    LOG: "[Error] Row {n}→{n+1}: Multi-axis gap ({format_gap(gap_axes)}). 
+    LOG: "[Error] Row {n}→{n+1}: Multi-axis gap ({format_gap(gap_axes)}).
            Cannot auto-fill. Rigorous manual review required."
 ```
 
@@ -2199,10 +2199,10 @@ IF next.type == "TEE" OR current.type == "TEE":
   // Gap near tees is often caused by not accounting for tee C dimension
   tee = whichever is the TEE
   C_dimension = config.tee_C_dimension[tee.bore]
-  
+
   IF C_dimension AND abs(gap_magnitude - C_dimension * 0.5) < 5mm:
-    LOG: "[Info] Row {n}: Gap near TEE ({gap:.1f}mm) approximately equals 
-           half the tee C dimension ({C_half:.1f}mm). 
+    LOG: "[Info] Row {n}: Gap near TEE ({gap:.1f}mm) approximately equals
+           half the tee C dimension ({C_half:.1f}mm).
            Likely tee body not accounted for in pipe length."
     ACTION: Adjust pipe length to account for tee C
     TIER: 2
@@ -2216,11 +2216,11 @@ CRITICAL RULE — enforced in all gap-fill actions:
   When inserting a filler element:
     - ALWAYS create a PIPE element.
     - NEVER create a fitting (flange, valve, bend, etc.) to fill a gap.
-    - Filler pipe inherits bore, material (CA3), design conditions (CA1, CA2) 
+    - Filler pipe inherits bore, material (CA3), design conditions (CA1, CA2)
       from the upstream element.
     - Filler pipe gets a generated RefNo: "{upstream_ref}_GapFill"
     - Filler pipe is tagged with Fixing Action = "GAPFILLING"
-    - LOG: "[Fix] Injected gap-fill PIPE: {length:.1f}mm {axis} {direction}, 
+    - LOG: "[Fix] Injected gap-fill PIPE: {length:.1f}mm {axis} {direction},
              bore={bore}, after Row {n}."
 ```
 
@@ -2233,20 +2233,20 @@ CRITICAL RULE — enforced in all gap-fill actions:
 ```
 IF gap is negative (overlap) along travel_axis:
   overlap = abs(gap_delta)
-  
+
   IF current.type == "PIPE" AND overlap <= 25.0mm:
     ACTION: TRIM current pipe EP2 back by overlap amount
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n}: Pipe trimmed by {overlap:.1f}mm to resolve 
+    LOG: "[Fix] Row {n}: Pipe trimmed by {overlap:.1f}mm to resolve
            {axis}-axis overlap with Row {n+1}."
-    
+
     // Update EP2:
     current.ep2[travel_axis] -= overlap * travel_direction
-  
+
   ELIF current.type == "PIPE" AND overlap > 25.0mm:
     ACTION: FLAG — large overlap
     TIER: 3 (warning)
-    LOG: "[Warning] Row {n}: Pipe overlaps next element by {overlap:.1f}mm. 
+    LOG: "[Warning] Row {n}: Pipe overlaps next element by {overlap:.1f}mm.
            Exceeds 25mm auto-trim threshold. Manual review."
 ```
 
@@ -2255,19 +2255,19 @@ IF gap is negative (overlap) along travel_axis:
 ```
 IF gap is negative AND current.type NOT IN ("PIPE"):
   // Cannot trim a fitting — it has fixed catalog dimensions
-  
+
   IF next.type == "PIPE":
     // Try trimming the NEXT pipe instead
     ACTION: TRIM next pipe EP1 forward by overlap amount
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n+1}: Pipe trimmed at start by {overlap:.1f}mm to resolve 
+    LOG: "[Fix] Row {n+1}: Pipe trimmed at start by {overlap:.1f}mm to resolve
            overlap with upstream {type} (Row {n})."
   ELSE:
     // Both are rigid — cannot auto-fix
     ACTION: FLAG
     TIER: 4 (error)
-    LOG: "[Error] Row {n}→{n+1}: Rigid-on-rigid overlap ({current.type} → 
-           {next.type}). Neither can be trimmed. {overlap:.1f}mm overlap. 
+    LOG: "[Error] Row {n}→{n+1}: Rigid-on-rigid overlap ({current.type} →
+           {next.type}). Neither can be trimmed. {overlap:.1f}mm overlap.
            Requires coordinate correction."
 ```
 
@@ -2277,8 +2277,8 @@ IF gap is negative AND current.type NOT IN ("PIPE"):
 IF current.type NOT IN ("PIPE") AND next.type NOT IN ("PIPE"):
   ACTION: NEVER auto-fix
   TIER: 4 (error)
-  LOG: "[Error] Row {n}→{n+1}: {current.type} overlaps {next.type} by 
-         {overlap:.1f}mm. Both are rigid fittings with catalog dimensions. 
+  LOG: "[Error] Row {n}→{n+1}: {current.type} overlaps {next.type} by
+         {overlap:.1f}mm. Both are rigid fittings with catalog dimensions.
          Cannot trim either. Investigate pipe between them or coordinate error."
 ```
 
@@ -2292,7 +2292,7 @@ IF next.ep1 is "behind" current.ep1 in travel direction:
   // B starts before A even begins — complete spatial overlap
   ACTION: FLAG as major error
   TIER: 4 (error)
-  LOG: "[Error] Row {n+1} ({next.type}) envelops Row {n} ({current.type}). 
+  LOG: "[Error] Row {n+1} ({next.type}) envelops Row {n} ({current.type}).
          Elements are spatially stacked. One is likely misplaced entirely."
 ```
 
@@ -2302,16 +2302,16 @@ IF next.ep1 is "behind" current.ep1 in travel direction:
 IF current.type == "PIPE" AND next.type == "TEE":
   overlap = abs(gap_delta)
   tee_half_C = config.tee_C_dimension[next.bore] / 2
-  
+
   IF abs(overlap - tee_half_C) < 3mm:
     // Overlap equals tee half-body — pipe wasn't trimmed for tee insertion
     ACTION: TRIM pipe by tee half-C
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n}: Pipe trimmed by {tee_half_C:.1f}mm 
+    LOG: "[Fix] Row {n}: Pipe trimmed by {tee_half_C:.1f}mm
            (half tee C dimension) to accommodate TEE at Row {n+1}."
   ELSE:
     // Overlap doesn't match tee dimension — something else is wrong
-    LOG: "[Warning] Row {n}: Pipe overlaps TEE by {overlap:.1f}mm 
+    LOG: "[Warning] Row {n}: Pipe overlaps TEE by {overlap:.1f}mm
            (tee half-C = {tee_half_C:.1f}mm). Non-standard overlap."
     TIER: 3
 ```
@@ -2321,19 +2321,19 @@ IF current.type == "PIPE" AND next.type == "TEE":
 ```
 AFTER trimming a pipe (R-OVR-01 or R-OVR-02):
   remaining_length = element_length(trimmed_pipe)
-  
+
   IF remaining_length < 0:
     // Trimming would make pipe go negative — pipe is entirely inside overlap
     ACTION: DELETE the pipe entirely
     TIER: 2 (auto-fix with log)
-    LOG: "[Fix] Row {n}: Pipe entirely consumed by overlap ({overlap:.1f}mm > 
+    LOG: "[Fix] Row {n}: Pipe entirely consumed by overlap ({overlap:.1f}mm >
            original length {original:.1f}mm). Pipe deleted."
-  
+
   ELIF remaining_length < 6.0mm:
     // After trimming, pipe is micro-sized — delete it (R-GEO-01)
     ACTION: DELETE
     TIER: 2
-    LOG: "[Fix] Row {n}: Pipe reduced to {remaining:.1f}mm after trim. 
+    LOG: "[Fix] Row {n}: Pipe reduced to {remaining:.1f}mm after trim.
            Below 6mm threshold. Deleted."
 ```
 
@@ -2346,8 +2346,8 @@ AFTER trimming a pipe (R-OVR-01 or R-OVR-02):
 ```
 FOR each TEE:
   IF branchBore > bore (header bore):
-    LOG: "[Error] Row {n}: TEE branch bore ({branchBore}mm) exceeds 
-           header bore ({bore}mm). Header and branch may be swapped, 
+    LOG: "[Error] Row {n}: TEE branch bore ({branchBore}mm) exceeds
+           header bore ({bore}mm). Header and branch may be swapped,
            or tee data is corrupt."
     TIER: 4
 ```
@@ -2357,14 +2357,14 @@ FOR each TEE:
 ```
 FOR each OLET:
   ratio = branchBore / bore  (branch / header)
-  
+
   IF ratio > 0.5:
-    LOG: "[Warning] Row {n}: OLET branch/header ratio = {ratio:.2f} (> 0.5). 
+    LOG: "[Warning] Row {n}: OLET branch/header ratio = {ratio:.2f} (> 0.5).
            Consider using a TEE instead of olet for this size combination."
     TIER: 3
-  
+
   IF ratio > 0.8:
-    LOG: "[Error] Row {n}: OLET branch/header ratio = {ratio:.2f} (> 0.8). 
+    LOG: "[Error] Row {n}: OLET branch/header ratio = {ratio:.2f} (> 0.8).
            Olets are not suitable for near-equal bore ratios. Use TEE."
     TIER: 4
 ```
@@ -2376,9 +2376,9 @@ FOR each TEE:
   header_axis = detect_element_axis(TEE using EP1, EP2)
   branch_vector = BP - CP
   branch_axis = dominant_axis(branch_vector)
-  
+
   IF branch_axis == header_axis:
-    LOG: "[Error] Row {n}: TEE branch axis ({branch_axis}) is same as 
+    LOG: "[Error] Row {n}: TEE branch axis ({branch_axis}) is same as
            header axis ({header_axis}). Branch must be perpendicular to header."
     TIER: 4
 ```
@@ -2389,17 +2389,17 @@ FOR each TEE:
 FOR each TEE:
   header_vec = normalize(EP2 - EP1)
   branch_vec = normalize(BP - CP)
-  
+
   dot_product = dot(header_vec, branch_vec)
   angle_from_perpendicular = abs(acos(abs(dot_product)) - pi/2) in degrees
-  
+
   IF angle_from_perpendicular > 5.0 degrees:
-    LOG: "[Warning] Row {n}: TEE branch is {angle:.1f}° from perpendicular 
+    LOG: "[Warning] Row {n}: TEE branch is {angle:.1f}° from perpendicular
            to header. Expected 90°. Wye fitting or data error?"
     TIER: 3
-  
+
   IF angle_from_perpendicular > 15.0 degrees:
-    LOG: "[Error] Row {n}: TEE branch is {angle:.1f}° from perpendicular. 
+    LOG: "[Error] Row {n}: TEE branch is {angle:.1f}° from perpendicular.
            Severely non-perpendicular. Data error."
     TIER: 4
 ```
@@ -2409,15 +2409,15 @@ FOR each TEE:
 ```
 AFTER walking a branch chain from TEE BP:
   branch_first = first element in branch chain
-  
+
   IF distance(TEE.BP, branch_first.EP1) > 25mm:
-    LOG: "[Error] Row {n}: TEE branch point does not connect to next branch 
+    LOG: "[Error] Row {n}: TEE branch point does not connect to next branch
            element. Gap = {gap:.1f}mm. Branch chain may be broken."
     TIER: 4
-  
+
   // Also check bore continuity at branch start
   IF branch_first.bore != TEE.branchBore:
-    LOG: "[Warning] Row {n}: TEE branch bore ({TEE.branchBore}mm) does not 
+    LOG: "[Warning] Row {n}: TEE branch bore ({TEE.branchBore}mm) does not
            match first branch element bore ({branch_first.bore}mm)."
     TIER: 3
 ```
@@ -2444,13 +2444,13 @@ When two elements share a travel axis, their non-travel coordinates must match. 
 FOR each SUPPORT:
   // Determine if support is on a vertical run
   adjacent_pipe = find_containing_pipe(support.coor, chain)
-  
+
   IF adjacent_pipe:
     pipe_axis = detect_element_axis(adjacent_pipe)
-    
+
     IF pipe_axis == "Z":
-      LOG: "[Warning] Row {n}: Support on vertical pipe run ({axis}-axis). 
-             Verify support type is appropriate for vertical loading 
+      LOG: "[Warning] Row {n}: Support on vertical pipe run ({axis}-axis).
+             Verify support type is appropriate for vertical loading
              (e.g., trunnion, spring hanger, not a simple rest)."
       TIER: 3
 ```
@@ -2459,14 +2459,14 @@ FOR each SUPPORT:
 
 ```
 FOR two adjacent PIPE elements:
-  IF same travel_axis AND same travel_direction 
+  IF same travel_axis AND same travel_direction
      AND gap < 1.0mm (or zero)
      AND same bore AND same CA3 AND same CA4 AND same CA1 AND same CA2:
-    
+
     combined_length = element_length(pipe1) + element_length(pipe2)
-    
-    LOG: "[Info] Row {n} and Row {n+1}: Two collinear pipes with identical 
-           properties. Can be merged into single {combined_length:.0f}mm pipe. 
+
+    LOG: "[Info] Row {n} and Row {n+1}: Two collinear pipes with identical
+           properties. Can be merged into single {combined_length:.0f}mm pipe.
            (Not auto-merged — may have deliberate stress analysis node points.)"
     TIER: — (info/suggestion only, never auto-merge)
 ```
@@ -2476,11 +2476,11 @@ FOR two adjacent PIPE elements:
 ```
 FOR any coordinate value:
   suspicious_values = [0.0, 100000.0, 99999.0, 999999.0, -1.0, 1.0]
-  
+
   IF value IN suspicious_values AND value appears as X, Y, or Z:
     // Check if the value is consistent with adjacent elements
     IF adjacent elements do NOT have similar values in this axis:
-      LOG: "[Warning] Row {n}: Coordinate {axis}={value:.0f} looks like a 
+      LOG: "[Warning] Row {n}: Coordinate {axis}={value:.0f} looks like a
              placeholder or default value. Adjacent elements use {axis}≈{avg:.0f}."
       TIER: 3
 ```
@@ -2498,14 +2498,14 @@ FOR all elements in a chain:
   FOR each coordinate value:
     decimal_places = count_decimal_places(value)
     precisions.add(decimal_places)
-  
+
   IF len(precisions) > 1:
     dominant_precision = mode(all_precisions)
     outlier_rows = rows where precision != dominant_precision
-    
+
     FOR each outlier:
-      LOG: "[Warning] Row {n}: Coordinate precision ({prec} decimals) differs 
-             from chain standard ({dominant} decimals). 
+      LOG: "[Warning] Row {n}: Coordinate precision ({prec} decimals) differs
+             from chain standard ({dominant} decimals).
              Possible data source inconsistency."
       TIER: 3
 ```
@@ -2521,11 +2521,11 @@ DURING walk:
   IF current.ca[3] != context.current_material AND both are non-empty:
     IF previous element is FLANGE or VALVE:
       // Material change at a joint — acceptable
-      LOG: "[Info] Row {n}: Material changes from {old} to {new} at 
+      LOG: "[Info] Row {n}: Material changes from {old} to {new} at
              {prev_type} joint. Verified transition point."
     ELSE:
-      LOG: "[Warning] Row {n}: Material changes from {old} to {new} 
-             mid-pipe (no flange/joint between). 
+      LOG: "[Warning] Row {n}: Material changes from {old} to {new}
+             mid-pipe (no flange/joint between).
              Possible data merge from different line numbers."
       TIER: 3
 ```
@@ -2536,8 +2536,8 @@ DURING walk:
 DURING walk:
   IF current.ca[1] != context.current_pressure OR current.ca[2] != context.current_temp:
     IF both are non-empty and differ:
-      LOG: "[Warning] Row {n}: Design conditions change. 
-             Pressure: {old_p}→{new_p}, Temp: {old_t}→{new_t}. 
+      LOG: "[Warning] Row {n}: Design conditions change.
+             Pressure: {old_p}→{new_p}, Temp: {old_t}→{new_t}.
              Verify this is not a data merge from different line specs."
       TIER: 3
 ```
@@ -2547,13 +2547,13 @@ DURING walk:
 ```
 FOR each element:
   IF ca[8] is populated AND type IN ("PIPE", "SUPPORT"):
-    LOG: "[Warning] Row {n}: CA8 (weight) is populated for {type}. 
+    LOG: "[Warning] Row {n}: CA8 (weight) is populated for {type}.
            CA8 should only be on fittings (FLANGE, VALVE, etc.)."
     ACTION: Consider removing CA8 for PIPE/SUPPORT
     TIER: 3
-  
+
   IF ca[8] is NOT populated AND type IN ("FLANGE", "VALVE"):
-    LOG: "[Info] Row {n}: {type} has no CA8 (weight). 
+    LOG: "[Info] Row {n}: {type} has no CA8 (weight).
            Consider adding component weight for analysis."
     TIER: — (info)
 ```
@@ -2571,10 +2571,10 @@ FOR each element with skey:
     "REDUCER-CONCENTRIC": ["RC"],
     "REDUCER-ECCENTRIC": ["RE"],
   }
-  
+
   prefixes = expected_prefix.get(type, [])
   IF prefixes AND NOT any(skey.startswith(p) for p in prefixes):
-    LOG: "[Warning] Row {n}: SKEY '{skey}' does not match expected prefix 
+    LOG: "[Warning] Row {n}: SKEY '{skey}' does not match expected prefix
            for {type} (expected: {prefixes}). Wrong SKEY or wrong type?"
     TIER: 3
 ```
@@ -2588,19 +2588,19 @@ FOR each element with skey:
 ```
 AT end of chain walk:
   total_pipe_length = context.pipe_length_sum
-  
+
   // Check for zero or negative total
   IF total_pipe_length <= 0:
-    LOG: "[Error] Chain {id}: Total pipe length is {total:.0f}mm (≤ 0). 
+    LOG: "[Error] Chain {id}: Total pipe length is {total:.0f}mm (≤ 0).
            Chain has no effective piping. Fundamentally broken."
     TIER: 4
-  
+
   // Check pipe-to-fitting ratio
   total_chain_length = magnitude(context.cumulative_vector)
   total_fitting_length = total_chain_length - total_pipe_length
-  
+
   IF total_chain_length > 0 AND total_pipe_length / total_chain_length < 0.1:
-    LOG: "[Warning] Chain {id}: Pipe is only {pct:.0f}% of total chain length. 
+    LOG: "[Warning] Chain {id}: Pipe is only {pct:.0f}% of total chain length.
            Unusually high fitting density. Verify data."
     TIER: 3
 ```
@@ -2610,16 +2610,16 @@ AT end of chain walk:
 ```
 DURING walk, track distance since last bend:
   pipe_since_bend = pipe length accumulated since last BEND
-  
+
   AT each new BEND:
     min_tangent = 1.0 * config.pipe_OD[bore]  // 1D minimum tangent
-    
+
     IF pipe_since_bend < min_tangent AND pipe_since_bend > 0:
-      LOG: "[Warning] Row {n}: Only {pipe_since_bend:.0f}mm straight pipe 
-             before this bend. Minimum tangent for stress analysis is 
+      LOG: "[Warning] Row {n}: Only {pipe_since_bend:.0f}mm straight pipe
+             before this bend. Minimum tangent for stress analysis is
              {min_tangent:.0f}mm (1D). May cause flexibility analysis issues."
       TIER: 3
-    
+
     pipe_since_bend = 0  // reset counter
 ```
 
@@ -2630,24 +2630,24 @@ AT end of chain walk:
   // If chain connects two known terminal points (nozzles, tie-ins):
   start_point = chain[0].element.ep1
   end_point = chain[-1].element.ep2 (or last exit point)
-  
+
   expected_vector = end_point - start_point
   actual_vector = context.cumulative_vector
-  
+
   closure_error = magnitude(expected_vector - actual_vector)
-  
+
   IF closure_error > 5.0mm:
-    LOG: "[Warning] Chain {id}: Route closure error = {error:.1f}mm. 
-           Sum of element vectors does not close to terminal points. 
+    LOG: "[Warning] Chain {id}: Route closure error = {error:.1f}mm.
+           Sum of element vectors does not close to terminal points.
            Cumulative coordinate drift detected.
            Expected: ({ex:.1f}, {ey:.1f}, {ez:.1f})
            Actual:   ({ax:.1f}, {ay:.1f}, {az:.1f})
            Error:    ({dx:.1f}, {dy:.1f}, {dz:.1f})"
     TIER: 3
-  
+
   IF closure_error > 50.0mm:
     // Upgrade to error
-    LOG: "[Error] Chain {id}: Route closure error = {error:.1f}mm. 
+    LOG: "[Error] Chain {id}: Route closure error = {error:.1f}mm.
            Major cumulative error — missing elements or coordinate errors."
     TIER: 4
 ```
@@ -2664,10 +2664,10 @@ AT end of chain walk:
   flanges = [link for link in chain if link.element.type == "FLANGE"]
   terminal_flanges = flanges at chain start or end
   mid_flanges = flanges not at terminals
-  
+
   // Mid-chain flanges should come in pairs
   IF len(mid_flanges) % 2 != 0:
-    LOG: "[Warning] Chain {id}: Odd number of mid-chain flanges ({count}). 
+    LOG: "[Warning] Chain {id}: Odd number of mid-chain flanges ({count}).
            Flange joints require pairs. One mating flange may be missing."
     TIER: 3
 ```
@@ -2678,16 +2678,16 @@ AT end of chain walk:
 AT end of chain walk:
   // Very short chains with many fittings are suspicious
   IF len(chain) <= 2 AND all elements are fittings (no pipes):
-    LOG: "[Warning] Chain {id}: Chain has only fittings, no pipe. 
+    LOG: "[Warning] Chain {id}: Chain has only fittings, no pipe.
            Missing pipe elements between fittings?"
     TIER: 3
-  
+
   // Very long chains with no supports
   support_count = count supports in chain
   chain_length_m = magnitude(cumulative_vector) / 1000
-  
+
   IF chain_length_m > 10.0 AND support_count == 0:
-    LOG: "[Warning] Chain {id}: {chain_length_m:.1f}m of piping with 
+    LOG: "[Warning] Chain {id}: {chain_length_m:.1f}m of piping with
            no supports. Verify support data is included."
     TIER: 3
 ```
@@ -2713,12 +2713,12 @@ Priority 6: RECALCULATE derived data (LEN, AXIS, DELTA, BRLEN, pointers)
 
 ```
 RULE F-01: Only PIPE elements can be created, trimmed, or deleted by auto-fix.
-RULE F-02: Fittings (FLANGE, VALVE, BEND, TEE, OLET, REDUCER) are RIGID. 
+RULE F-02: Fittings (FLANGE, VALVE, BEND, TEE, OLET, REDUCER) are RIGID.
             Their coordinates come from catalog dimensions. Never modify fitting length.
-RULE F-03: When trimming a pipe, adjust EP2 (exit end) by default, not EP1 
+RULE F-03: When trimming a pipe, adjust EP2 (exit end) by default, not EP1
             (to preserve the connection with the upstream element).
 RULE F-04: When a pipe is trimmed to below 6mm, delete it entirely (triggers R-GEO-01).
-RULE F-05: When inserting a filler pipe, inherit ALL properties 
+RULE F-05: When inserting a filler pipe, inherit ALL properties
             (bore, CA1-CA10 except CA8, material) from the upstream element.
 RULE F-06: Filler pipes get Fixing Action = "GAPFILLING".
 RULE F-07: Deleted elements get Fixing Action = "DELETED".
@@ -2850,55 +2850,55 @@ smartFixer: {
   // Connectivity
   connectionTolerance: 25.0,       // mm — max distance to consider two points "connected"
   gridSnapResolution: 1.0,         // mm — spatial index grid cell size
-  
+
   // Micro-element
   microPipeThreshold: 6.0,         // mm — pipes below this are deleted
   microFittingThreshold: 1.0,      // mm — fittings below this are flagged
-  
+
   // Gap thresholds
   negligibleGap: 1.0,              // mm — gaps below this are snapped silently
   autoFillMaxGap: 25.0,            // mm — axial gaps up to this are auto-filled
   reviewGapMax: 100.0,             // mm — gaps up to this are warned; above = error
-  
+
   // Overlap thresholds
   autoTrimMaxOverlap: 25.0,        // mm — pipe overlaps up to this are auto-trimmed
-  
+
   // Snapping thresholds
   silentSnapThreshold: 2.0,        // mm — drift below this snapped silently
   warnSnapThreshold: 10.0,         // mm — drift below this snapped with warning
-  
+
   // Fold-back
   autoDeleteFoldbackMax: 25.0,     // mm — fold-back pipes up to this are deleted
-  
+
   // Axis detection
   offAxisThreshold: 0.5,           // mm — deltas below this are treated as zero
   diagonalMinorThreshold: 2.0,     // mm — minor axis deltas below this are snapped
-  
+
   // Fitting dimensions
   fittingDimensionTolerance: 0.20, // 20% deviation from catalog triggers warning
-  
+
   // Bend
   bendRadiusTolerance: 0.05,       // 5% deviation from 1.0D or 1.5D
-  
+
   // Tangent
   minTangentMultiplier: 1.0,       // minimum tangent = multiplier × OD
-  
+
   // Route closure
   closureWarningThreshold: 5.0,    // mm
   closureErrorThreshold: 50.0,     // mm
-  
+
   // Bore
   maxBoreForInchDetection: 48,     // bore values ≤ this may be inches
-  
+
   // Branch
   oletMaxRatioWarning: 0.5,        // branch/header ratio above this = warning
   oletMaxRatioError: 0.8,          // branch/header ratio above this = error
   branchPerpendicularityWarn: 5.0, // degrees from 90°
   branchPerpendicularityError: 15.0,
-  
+
   // Elevation
   horizontalElevationDrift: 2.0,   // mm — Z drift in horizontal run
-  
+
   // Aggregate
   minPipeRatio: 0.10,              // minimum pipe / total chain length ratio
   noSupportAlertLength: 10000.0,   // mm (10m) — warn if no supports above this
