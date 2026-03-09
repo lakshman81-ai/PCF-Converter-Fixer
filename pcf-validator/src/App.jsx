@@ -105,28 +105,28 @@ const NULL_COORD = { x: null, y: null, z: null };
 // 2. MATH & UTILITY FUNCTIONS
 // ----------------------------------------------------------------------------
 
-function vecSub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
-function vecAdd(a, b) { return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
-function vecScale(v, s) { return { x: v.x * s, y: v.y * s, z: v.z * s }; }
-function vecDot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-function vecCross(a, b) {
-  return {
+const vec = {
+  sub:   (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }),
+  add:   (a, b) => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }),
+  scale: (v, s) => ({ x: v.x * s, y: v.y * s, z: v.z * s }),
+  dot:   (a, b) => a.x * b.x + a.y * b.y + a.z * b.z,
+  cross: (a, b) => ({
     x: a.y * b.z - a.z * b.y,
     y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x
-  };
-}
-function vecMag(v) { return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
-function vecNormalize(v) {
-  const m = vecMag(v);
-  return m === 0 ? { x: 0, y: 0, z: 0 } : vecScale(v, 1 / m);
-}
-function vecDist(a, b) { return vecMag(vecSub(a, b)); }
-function midpoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 }; }
-function coordsApproxEqual(a, b, tol = 1.0) {
-  if (!a || !b) return false;
-  return Math.abs(a.x - b.x) <= tol && Math.abs(a.y - b.y) <= tol && Math.abs(a.z - b.z) <= tol;
-}
+    z: a.x * b.y - a.y * b.x,
+  }),
+  mag:   (v) => Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z),
+  normalize: (v) => {
+    const m = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return m > 0 ? { x: v.x / m, y: v.y / m, z: v.z / m } : { x: 0, y: 0, z: 0 };
+  },
+  dist:  (a, b) => Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2),
+  mid:   (a, b) => ({ x: (a.x+b.x)/2, y: (a.y+b.y)/2, z: (a.z+b.z)/2 }),
+  approxEqual: (a, b, tol = 1.0) =>
+    Math.abs(a.x - b.x) <= tol && Math.abs(a.y - b.y) <= tol && Math.abs(a.z - b.z) <= tol,
+  isZero: (v) => v.x === 0 && v.y === 0 && v.z === 0,
+};
+
 function isValidCoord(c) {
   return c && c.x != null && c.y != null && c.z != null;
 }
@@ -136,8 +136,899 @@ function coordsEqual(a, b) {
 }
 
 // Format number utility
-const fmtCoordStr = (c, dec = 4) => c ? `${c.x.toFixed(dec)}, ${c.y.toFixed(dec)}, ${c.z.toFixed(dec)}` : '';
+const fmtCoordStr = (c, dec = 4) => (c && c.x != null && c.y != null && c.z != null) ? `${Number(c.x).toFixed(dec)}, ${Number(c.y).toFixed(dec)}, ${Number(c.z).toFixed(dec)}` : '';
 const fmtCoord = (c) => fmtCoordStr(c, 4);
+
+// ----------------------------------------------------------------------------
+// SMART FIXER — CHAIN WALKER ENGINE
+// ----------------------------------------------------------------------------
+
+// Region B: Connectivity Graph Builder
+function buildConnectivityGraph(dataTable, config) {
+  const tolerance = config.smartFixer?.connectionTolerance ?? 25.0;
+  const gridSnap = config.smartFixer?.gridSnapResolution ?? 1.0;
+
+  const snap = (coord) => ({
+    x: Math.round(coord.x / gridSnap) * gridSnap,
+    y: Math.round(coord.y / gridSnap) * gridSnap,
+    z: Math.round(coord.z / gridSnap) * gridSnap,
+  });
+  const coordKey = (c) => `${c.x},${c.y},${c.z}`;
+
+  const components = dataTable
+    .filter(row => row.type && !["ISOGEN-FILES","UNITS-BORE","UNITS-CO-ORDS","UNITS-WEIGHT","UNITS-BOLT-DIA","UNITS-BOLT-LENGTH","PIPELINE-REFERENCE","MESSAGE-SQUARE"].includes(row.type.toUpperCase()))
+    .map(row => ({
+      ...row,
+      entryPoint: getEntryPoint(row),
+      exitPoint: getExitPoint(row),
+      branchExitPoint: getBranchExitPoint(row),
+    }));
+
+  const entryIndex = new Map();
+  for (const comp of components) {
+    if (comp.entryPoint && !vec.isZero(comp.entryPoint)) {
+      const key = coordKey(snap(comp.entryPoint));
+      if (!entryIndex.has(key)) entryIndex.set(key, []);
+      entryIndex.get(key).push(comp);
+    }
+  }
+
+  const edges = new Map();
+  const branchEdges = new Map();
+  const hasIncoming = new Set();
+
+  for (const comp of components) {
+    if (!comp.exitPoint || vec.isZero(comp.exitPoint)) continue;
+
+    const match = findNearestEntry(comp.exitPoint, entryIndex, snap, coordKey, tolerance, comp._rowIndex);
+    if (match) {
+      edges.set(comp._rowIndex, match);
+      hasIncoming.add(match._rowIndex);
+    }
+
+    if (comp.branchExitPoint && !vec.isZero(comp.branchExitPoint)) {
+      const brMatch = findNearestEntry(comp.branchExitPoint, entryIndex, snap, coordKey, tolerance, comp._rowIndex);
+      if (brMatch) {
+        branchEdges.set(comp._rowIndex, brMatch);
+        hasIncoming.add(brMatch._rowIndex);
+      }
+    }
+  }
+
+  const terminals = components.filter(c => !hasIncoming.has(c._rowIndex) && c.type !== "SUPPORT");
+
+  return { components, edges, branchEdges, terminals, entryIndex };
+}
+
+function getEntryPoint(row) {
+  const t = (row.type || "").toUpperCase();
+  if (t === "SUPPORT") return row.supportCoor || null;
+  if (t === "OLET")    return row.cp || null;
+  return row.ep1 || null;
+}
+
+function getExitPoint(row) {
+  const t = (row.type || "").toUpperCase();
+  if (t === "SUPPORT") return null;
+  if (t === "OLET")    return row.bp || null;
+  return row.ep2 || null;
+}
+
+function getBranchExitPoint(row) {
+  const t = (row.type || "").toUpperCase();
+  if (t === "TEE") return row.bp || null;
+  return null;
+}
+
+function findNearestEntry(exitCoord, entryIndex, snap, coordKey, tolerance, excludeRowIndex) {
+  const snapped = snap(exitCoord);
+  const key = coordKey(snapped);
+
+  const candidates = entryIndex.get(key) || [];
+  let best = null;
+  let bestDist = tolerance + 1;
+
+  for (const cand of candidates) {
+    if (cand._rowIndex === excludeRowIndex) continue;
+    const d = vec.dist(exitCoord, cand.entryPoint);
+    if (d < bestDist) { bestDist = d; best = cand; }
+  }
+
+  if (!best) {
+    const step = snap({ x: 1, y: 1, z: 1 }).x || 1.0;
+    for (let dx = -step; dx <= step; dx += step) {
+      for (let dy = -step; dy <= step; dy += step) {
+        for (let dz = -step; dz <= step; dz += step) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          const nk = coordKey({ x: snapped.x + dx, y: snapped.y + dy, z: snapped.z + dz });
+          for (const cand of (entryIndex.get(nk) || [])) {
+            if (cand._rowIndex === excludeRowIndex) continue;
+            const d = vec.dist(exitCoord, cand.entryPoint);
+            if (d < bestDist) { bestDist = d; best = cand; }
+          }
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
+// Region C: Chain Walker
+function walkAllChains(graph, config, log) {
+  const visited = new Set();
+  const allChains = [];
+
+  for (const terminal of graph.terminals) {
+    if (visited.has(terminal._rowIndex)) continue;
+    const context = createInitialContext(terminal, allChains.length);
+    const chain = walkChain(terminal, graph, context, visited, config, log);
+    allChains.push(chain);
+  }
+
+  const orphans = graph.components.filter(c => !visited.has(c._rowIndex) && c.type !== "SUPPORT");
+  for (const orphan of orphans) {
+    log.push({
+      type: "Error", ruleId: "R-TOP-02", tier: 4, row: orphan._rowIndex,
+      message: `Orphan: ${orphan.type} (Row ${orphan._rowIndex}) not connected to any chain.`
+    });
+  }
+
+  return { chains: allChains, orphans };
+}
+
+function createInitialContext(startElement, chainIndex) {
+  return {
+    travelAxis: null,
+    travelDirection: null,
+    currentBore: startElement.bore || 0,
+    currentMaterial: startElement.ca?.[3] || "",
+    currentPressure: startElement.ca?.[1] || "",
+    currentTemp: startElement.ca?.[2] || "",
+    chainId: `Chain-${chainIndex + 1}`,
+    cumulativeVector: { x: 0, y: 0, z: 0 },
+    pipeLengthSum: 0,
+    lastFittingType: null,
+    elevation: startElement.ep1?.z || 0,
+    depth: 0,
+    pipeSinceLastBend: Infinity,
+  };
+}
+
+function walkChain(startElement, graph, context, visited, config, log) {
+  const chain = [];
+  let current = startElement;
+  let prevElement = null;
+
+  while (current && !visited.has(current._rowIndex)) {
+    visited.add(current._rowIndex);
+    const type = (current.type || "").toUpperCase();
+
+    if (type === "SUPPORT") {
+      runSupportRules(current, chain, context, config, log);
+      current = graph.edges.get(current._rowIndex) || null;
+      continue;
+    }
+
+    const [elemAxis, elemDir] = detectElementAxis(current, config);
+    runElementRules(current, context, prevElement, elemAxis, elemDir, config, log);
+
+    if (elemAxis) {
+      context.travelAxis = elemAxis;
+      context.travelDirection = elemDir;
+    }
+    if (current.bore) context.currentBore = current.bore;
+    if (current.ca && current.ca[3]) context.currentMaterial = current.ca[3];
+    const elemVec = getElementVector(current);
+    context.cumulativeVector = vec.add(context.cumulativeVector, elemVec);
+    if (type === "PIPE") {
+      const len = vec.mag(elemVec);
+      context.pipeLengthSum += len;
+      context.pipeSinceLastBend += len;
+    }
+    if (type === "BEND") context.pipeSinceLastBend = 0;
+    if (!["PIPE", "SUPPORT"].includes(type)) context.lastFittingType = type;
+
+    const nextElement = graph.edges.get(current._rowIndex) || null;
+    let gapVector = null;
+    let fixAction = null;
+
+    if (nextElement) {
+      const exitPt = getExitPoint(current);
+      const entryPt = getEntryPoint(nextElement);
+      if (exitPt && entryPt) {
+        gapVector = vec.sub(entryPt, exitPt);
+        fixAction = analyzeGap(gapVector, context, current, nextElement, config, log);
+      }
+    }
+
+    chain.push({
+      element: current,
+      elemAxis,
+      elemDir,
+      travelAxis: context.travelAxis,
+      travelDirection: context.travelDirection,
+      gapToNext: gapVector,
+      fixAction,
+      nextElement,
+      branchChain: null,
+    });
+
+    if (type === "TEE") {
+      const branchStart = graph.branchEdges.get(current._rowIndex);
+      if (branchStart && !visited.has(branchStart._rowIndex)) {
+        const branchCtx = {
+          ...JSON.parse(JSON.stringify(context)),
+          travelAxis: detectBranchAxis(current),
+          travelDirection: detectBranchDirection(current),
+          currentBore: current.branchBore || current.bore,
+          depth: context.depth + 1,
+          chainId: `${context.chainId}.B`,
+          pipeLengthSum: 0,
+          cumulativeVector: { x: 0, y: 0, z: 0 },
+          pipeSinceLastBend: Infinity,
+        };
+        const branchChain = walkChain(branchStart, graph, branchCtx, visited, config, log);
+        chain[chain.length - 1].branchChain = branchChain;
+      }
+    }
+
+    prevElement = current;
+    current = nextElement;
+  }
+
+  runAggregateRules(chain, context, config, log);
+  return chain;
+}
+
+// Region D: Element Axis Detector
+function detectElementAxis(element, config) {
+  const threshold = config.smartFixer?.offAxisThreshold ?? 0.5;
+  const type = (element.type || "").toUpperCase();
+
+  if (type === "SUPPORT" || type === "OLET") return [null, null];
+
+  const ep1 = element.ep1;
+  const ep2 = element.ep2;
+  if (!ep1 || !ep2) return [null, null];
+
+  const dx = ep2.x - ep1.x;
+  const dy = ep2.y - ep1.y;
+  const dz = ep2.z - ep1.z;
+
+  const axes = [];
+  if (Math.abs(dx) > threshold) axes.push(["X", dx]);
+  if (Math.abs(dy) > threshold) axes.push(["Y", dy]);
+  if (Math.abs(dz) > threshold) axes.push(["Z", dz]);
+
+  if (axes.length === 0) return [null, null];
+
+  if (axes.length === 1) return [axes[0][0], axes[0][1] > 0 ? 1 : -1];
+
+  if (type === "BEND") {
+    const sorted = [...axes].sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+    return [sorted[0][0], sorted[0][1] > 0 ? 1 : -1];
+  }
+
+  const dominant = axes.reduce((a, b) => Math.abs(a[1]) > Math.abs(b[1]) ? a : b);
+  return [dominant[0], dominant[1] > 0 ? 1 : -1];
+}
+
+function detectBranchAxis(teeElement) {
+  if (!teeElement.bp || !teeElement.cp) return null;
+  const bv = vec.sub(teeElement.bp, teeElement.cp);
+  const axes = [["X", Math.abs(bv.x)], ["Y", Math.abs(bv.y)], ["Z", Math.abs(bv.z)]];
+  const dominant = axes.reduce((a, b) => a[1] > b[1] ? a : b);
+  return dominant[0];
+}
+
+function detectBranchDirection(teeElement) {
+  if (!teeElement.bp || !teeElement.cp) return null;
+  const bv = vec.sub(teeElement.bp, teeElement.cp);
+  const axis = detectBranchAxis(teeElement);
+  if (!axis) return null;
+  return bv[axis.toLowerCase()] > 0 ? 1 : -1;
+}
+
+function getElementVector(element) {
+  const type = (element.type || "").toUpperCase();
+  if (type === "SUPPORT" || type === "OLET") return { x: 0, y: 0, z: 0 };
+  if (!element.ep1 || !element.ep2) return { x: 0, y: 0, z: 0 };
+  return vec.sub(element.ep2, element.ep1);
+}
+
+// Region E: Gap/Overlap Analyzer
+function analyzeGap(gapVector, context, current, next, config, log) {
+  const cfg = config.smartFixer || {};
+  const negligible = cfg.negligibleGap ?? 1.0;
+  const autoFillMax = cfg.autoFillMaxGap ?? 25.0;
+  const reviewMax = cfg.reviewGapMax ?? 100.0;
+  const autoTrimMax = cfg.autoTrimMaxOverlap ?? 25.0;
+  const silentSnap = cfg.silentSnapThreshold ?? 2.0;
+  const warnSnap = cfg.warnSnapThreshold ?? 10.0;
+
+  const gapMag = vec.mag(gapVector);
+
+  if (gapMag < negligible) {
+    if (gapMag > 0.1) {
+      return { type: "SNAP", ruleId: "R-GAP-01", tier: 1, description: `SNAP [R-GAP-01]: Close ${Number(gapMag).toFixed(2)}mm micro-gap by snapping endpoints.`, gapVector, current, next };
+    }
+    return null;
+  }
+
+  const axes = decomposeGap(gapVector, cfg.offAxisThreshold ?? 0.5);
+  const alongTravel = axes.find(a => a.axis === context.travelAxis);
+  const lateral = axes.filter(a => a.axis !== context.travelAxis);
+  const totalLateral = lateral.reduce((s, a) => s + Math.abs(a.delta), 0);
+  const alongDelta = alongTravel ? alongTravel.delta : 0;
+  const isOverlap = alongDelta * context.travelDirection < 0;
+
+  if (isOverlap && axes.length === 1 && axes[0].axis === context.travelAxis) {
+    const overlapAmt = Math.abs(alongDelta);
+    return analyzeOverlap(overlapAmt, context, current, next, cfg, log);
+  }
+
+  if (axes.length === 1 && axes[0].axis === context.travelAxis) {
+    const gapAmt = Math.abs(alongDelta);
+    const dir = directionLabel(context.travelAxis, context.travelDirection);
+    if (gapAmt <= autoFillMax) {
+      return { type: "INSERT", ruleId: "R-GAP-02", tier: 2, description: buildInsertDescription(gapAmt, dir, context, current), gapAmount: gapAmt, fillAxis: context.travelAxis, fillDir: context.travelDirection, current, next };
+    }
+    if (gapAmt <= reviewMax) {
+      return { type: "REVIEW", ruleId: "R-GAP-03", tier: 3, description: `REVIEW [R-GAP-03]: ${Number(gapAmt).toFixed(1)}mm gap along ${dir}. Exceeds ${autoFillMax}mm auto-fill threshold. Manual review.`, current, next };
+    }
+    return { type: "ERROR", ruleId: "R-GAP-03", tier: 4, description: `ERROR [R-GAP-03]: ${Number(gapAmt).toFixed(1)}mm gap along ${dir}. Major gap — likely missing component(s).`, current, next };
+  }
+
+  if (axes.length === 1 && axes[0].axis !== context.travelAxis) {
+    const latAmt = Math.abs(axes[0].delta);
+    if (latAmt < silentSnap) {
+      return { type: "SNAP", ruleId: "R-GAP-04", tier: 2, description: `SNAP [R-GAP-04]: Lateral offset ${Number(latAmt).toFixed(1)}mm on ${axes[0].axis}-axis (travel is ${context.travelAxis}). Snapping to align.`, current, next };
+    }
+    return { type: "ERROR", ruleId: "R-GAP-04", tier: 4, description: `ERROR [R-GAP-04]: Lateral offset ${Number(latAmt).toFixed(1)}mm on ${axes[0].axis}-axis. Pipe has shifted sideways. Manual review.`, current, next };
+  }
+
+  if (axes.length >= 2 && totalLateral < silentSnap && Math.abs(alongDelta) <= autoFillMax) {
+    const gapAmt = Math.abs(alongDelta);
+    const dir = directionLabel(context.travelAxis, context.travelDirection);
+    return { type: "INSERT", ruleId: "R-GAP-05", tier: 2, description: `INSERT [R-GAP-05]: Multi-axis gap (axial=${Number(gapAmt).toFixed(1)}mm, lateral=${Number(totalLateral).toFixed(1)}mm). Lateral snapped, axial filled with ${Number(gapAmt).toFixed(1)}mm pipe ${dir}.`, gapAmount: gapAmt, fillAxis: context.travelAxis, fillDir: context.travelDirection, current, next };
+  }
+
+  return { type: "ERROR", ruleId: "R-GAP-06", tier: 4, description: `ERROR [R-GAP-06]: Multi-axis gap (${formatGapAxes(axes)}). Cannot auto-fill. Rigorous manual review required.`, current, next };
+}
+
+function analyzeOverlap(overlapAmt, context, current, next, cfg, log) {
+  const autoTrimMax = cfg.autoTrimMaxOverlap ?? 25.0;
+  const currType = (current.type || "").toUpperCase();
+  const nextType = (next.type || "").toUpperCase();
+  const dir = directionLabel(context.travelAxis, context.travelDirection);
+
+  if (currType !== "PIPE" && nextType !== "PIPE") {
+    return { type: "ERROR", ruleId: "R-OVR-03", tier: 4, description: `ERROR [R-OVR-03]: ${currType} overlaps ${nextType} by ${Number(overlapAmt).toFixed(1)}mm. Both are rigid fittings. Cannot auto-trim.`, current, next };
+  }
+
+  if (currType === "PIPE" && overlapAmt <= autoTrimMax) {
+    return { type: "TRIM", ruleId: "R-OVR-01", tier: 2, description: buildTrimDescription(overlapAmt, dir, current, next, "current"), trimAmount: overlapAmt, trimTarget: "current", current, next };
+  }
+
+  if (currType !== "PIPE" && nextType === "PIPE" && overlapAmt <= autoTrimMax) {
+    return { type: "TRIM", ruleId: "R-OVR-02", tier: 2, description: buildTrimDescription(overlapAmt, dir, current, next, "next"), trimAmount: overlapAmt, trimTarget: "next", current, next };
+  }
+
+  return { type: "REVIEW", ruleId: "R-OVR-01", tier: 3, description: `REVIEW [R-OVR-01]: ${Number(overlapAmt).toFixed(1)}mm overlap between ${currType} (Row ${current._rowIndex}) and ${nextType} (Row ${next._rowIndex}). Exceeds ${autoTrimMax}mm auto-trim threshold.`, current, next };
+}
+
+function decomposeGap(gapVec, threshold) {
+  const result = [];
+  if (Math.abs(gapVec.x) > threshold) result.push({ axis: "X", delta: gapVec.x });
+  if (Math.abs(gapVec.y) > threshold) result.push({ axis: "Y", delta: gapVec.y });
+  if (Math.abs(gapVec.z) > threshold) result.push({ axis: "Z", delta: gapVec.z });
+  return result;
+}
+
+function directionLabel(axis, dir) {
+  const map = { X: ["+X(East)", "-X(West)"], Y: ["+Y(North)", "-Y(South)"], Z: ["+Z(Up)", "-Z(Down)"] };
+  return axis ? (dir > 0 ? map[axis][0] : map[axis][1]) : "unknown";
+}
+
+function formatGapAxes(axes) {
+  return axes.map(a => `${a.axis}=${Number(a.delta).toFixed(1)}mm`).join(", ");
+}
+
+// Region F: Rule Engine
+function runElementRules(element, context, prevElement, elemAxis, elemDir, config, log) {
+  const type = (element.type || "").toUpperCase();
+  const cfg = config.smartFixer || {};
+  const ri = element._rowIndex;
+
+  if (type === "PIPE") {
+    const len = vec.mag(getElementVector(element));
+    if (len < (cfg.microPipeThreshold ?? 6.0) && len > 0) {
+      log.push({ type: "Fix", ruleId: "R-GEO-01", tier: 1, row: ri, message: `DELETE [R-GEO-01]: Micro-pipe ${Number(len).toFixed(1)}mm < ${cfg.microPipeThreshold ?? 6}mm threshold.` });
+      element._proposedFix = { type: "DELETE", ruleId: "R-GEO-01", tier: 1 };
+    }
+  }
+
+  if (prevElement && element.bore !== context.currentBore) {
+    const prevType = (prevElement.type || "").toUpperCase();
+    if (!prevType.includes("REDUCER")) {
+      log.push({ type: "Error", ruleId: "R-GEO-02", tier: 4, row: ri, message: `ERROR [R-GEO-02]: Bore changes ${context.currentBore}→${element.bore} without reducer.` });
+    }
+  }
+
+  if (["PIPE", "FLANGE", "VALVE"].includes(type) && type !== "BEND") {
+    const ev = getElementVector(element);
+    const nonZero = [["X", ev.x], ["Y", ev.y], ["Z", ev.z]].filter(([_, d]) => Math.abs(d) > 0.5);
+    if (nonZero.length > 1) {
+      const dominant = nonZero.reduce((a, b) => Math.abs(a[1]) > Math.abs(b[1]) ? a : b);
+      const minorTotal = nonZero.filter(a => a[0] !== dominant[0]).reduce((s, a) => s + Math.abs(a[1]), 0);
+      if (minorTotal < (cfg.diagonalMinorThreshold ?? 2.0)) {
+        log.push({ type: "Fix", ruleId: "R-GEO-03", tier: 2, row: ri, message: `SNAP [R-GEO-03]: ${type} off-axis drift ${Number(minorTotal).toFixed(1)}mm. Snapping to pure ${dominant[0]}-axis.` });
+        element._proposedFix = { type: "SNAP_AXIS", ruleId: "R-GEO-03", tier: 2, dominantAxis: dominant[0] };
+      } else {
+        log.push({ type: "Error", ruleId: "R-GEO-03", tier: 4, row: ri, message: `ERROR [R-GEO-03]: ${type} runs diagonally (${nonZero.map(([a,d]) => `${a}=${Number(d).toFixed(1)}`).join(", ")}). Must align to single axis.` });
+      }
+    }
+  }
+
+  if (!["SUPPORT", "OLET"].includes(type) && element.ep1 && element.ep2) {
+    if (vec.approxEqual(element.ep1, element.ep2, 0.1)) {
+      log.push({ type: "Error", ruleId: "R-GEO-07", tier: 4, row: ri, message: `ERROR [R-GEO-07]: ${type} has zero length (EP1 ≈ EP2).` });
+    }
+  }
+
+  if (context.travelAxis && elemAxis && elemAxis !== context.travelAxis) {
+    if (!["BEND", "TEE"].includes(type)) {
+      log.push({ type: "Error", ruleId: "R-CHN-01", tier: 4, row: ri, message: `ERROR [R-CHN-01]: Axis changed ${context.travelAxis}→${elemAxis} at ${type}. Missing BEND?` });
+    }
+  }
+
+  if (context.travelAxis && elemAxis === context.travelAxis && elemDir !== context.travelDirection) {
+    if (type === "PIPE") {
+      const foldLen = vec.mag(getElementVector(element));
+      if (foldLen < (cfg.autoDeleteFoldbackMax ?? 25.0)) {
+        log.push({ type: "Fix", ruleId: "R-CHN-02", tier: 2, row: ri, message: `DELETE [R-CHN-02]: Fold-back pipe ${Number(foldLen).toFixed(1)}mm on ${elemAxis}-axis.` });
+        element._proposedFix = { type: "DELETE", ruleId: "R-CHN-02", tier: 2 };
+      } else {
+        log.push({ type: "Error", ruleId: "R-CHN-02", tier: 4, row: ri, message: `ERROR [R-CHN-02]: Fold-back ${Number(foldLen).toFixed(1)}mm on ${elemAxis}-axis. Too large to auto-delete.` });
+      }
+    } else if (type !== "BEND") {
+      log.push({ type: "Error", ruleId: "R-CHN-02", tier: 4, row: ri, message: `ERROR [R-CHN-02]: ${type} reverses direction on ${elemAxis}-axis.` });
+    }
+  }
+
+  if (type === "BEND" && context.lastFittingType === "BEND") {
+    if (context.pipeSinceLastBend < (cfg.minTangentMultiplier ?? 1.0) * (element.bore || 0) * 0.0254) {
+      log.push({ type: "Warning", ruleId: "R-CHN-03", tier: 3, row: ri, message: `WARNING [R-CHN-03]: Only ${Number(context.pipeSinceLastBend).toFixed(0)}mm pipe between bends. Short tangent.` });
+    }
+  }
+
+  if (prevElement && context.travelAxis && elemAxis === context.travelAxis) {
+    const exitPt = getExitPoint(prevElement);
+    const entryPt = getEntryPoint(element);
+    if (exitPt && entryPt) {
+      const nonTravelAxes = ["X", "Y", "Z"].filter(a => a !== context.travelAxis);
+      for (const axis of nonTravelAxes) {
+        const key = axis.toLowerCase();
+        const drift = Math.abs(entryPt[key] - exitPt[key]);
+        if (drift > 0.1 && drift < (cfg.silentSnapThreshold ?? 2.0)) {
+          log.push({ type: "Fix", ruleId: "R-CHN-06", tier: 1, row: ri, message: `SNAP [R-CHN-06]: ${axis} drifted ${Number(drift).toFixed(1)}mm. Silent snap.` });
+        } else if (drift >= (cfg.silentSnapThreshold ?? 2.0) && drift < (cfg.warnSnapThreshold ?? 10.0)) {
+          log.push({ type: "Fix", ruleId: "R-CHN-06", tier: 2, row: ri, message: `SNAP [R-CHN-06]: ${axis} drifted ${Number(drift).toFixed(1)}mm. Snap with warning.` });
+        } else if (drift >= (cfg.warnSnapThreshold ?? 10.0)) {
+          log.push({ type: "Error", ruleId: "R-CHN-06", tier: 4, row: ri, message: `ERROR [R-CHN-06]: ${axis} offset ${Number(drift).toFixed(1)}mm. Too large to snap.` });
+        }
+      }
+    }
+  }
+
+  if (context.currentMaterial && element.ca?.[3] && element.ca[3] !== context.currentMaterial) {
+    const prevType = prevElement ? (prevElement.type || "").toUpperCase() : "";
+    if (!["FLANGE", "VALVE"].includes(prevType)) {
+      log.push({ type: "Warning", ruleId: "R-DAT-03", tier: 3, row: ri, message: `WARNING [R-DAT-03]: Material changes ${context.currentMaterial}→${element.ca[3]} without joint.` });
+    }
+  }
+
+  if (type === "TEE" && element.branchBore > element.bore) {
+    log.push({ type: "Error", ruleId: "R-BRN-01", tier: 4, row: ri, message: `ERROR [R-BRN-01]: Branch bore (${element.branchBore}) > header bore (${element.bore}).` });
+  }
+
+  if (type === "TEE" && element.ep1 && element.ep2 && element.cp && element.bp) {
+    const headerVec = vec.sub(element.ep2, element.ep1);
+    const branchVec = vec.sub(element.bp, element.cp);
+    const hMag = vec.mag(headerVec);
+    const bMag = vec.mag(branchVec);
+    if (hMag > 0 && bMag > 0) {
+      const dotProd = Math.abs(vec.dot(headerVec, branchVec));
+      const cosAngle = dotProd / (hMag * bMag);
+      const angleDeg = Math.acos(Math.min(cosAngle, 1.0)) * 180 / Math.PI;
+      const offPerp = Math.abs(90 - angleDeg);
+      if (offPerp > (cfg.branchPerpendicularityError ?? 15.0)) {
+        log.push({ type: "Error", ruleId: "R-BRN-04", tier: 4, row: ri, message: `ERROR [R-BRN-04]: Branch ${Number(offPerp).toFixed(1)}° from perpendicular.` });
+      } else if (offPerp > (cfg.branchPerpendicularityWarn ?? 5.0)) {
+        log.push({ type: "Warning", ruleId: "R-BRN-04", tier: 3, row: ri, message: `WARNING [R-BRN-04]: Branch ${Number(offPerp).toFixed(1)}° from perpendicular.` });
+      }
+    }
+  }
+
+  if (element.skey) {
+    const prefixMap = { FLANGE: "FL", VALVE: "V", BEND: "BE", TEE: "TE", OLET: "OL" };
+    const expected = prefixMap[type];
+    if (expected && !element.skey.startsWith(expected)) {
+      log.push({ type: "Warning", ruleId: "R-DAT-06", tier: 3, row: ri, message: `WARNING [R-DAT-06]: SKEY '${element.skey}' prefix mismatch for ${type} (expected '${expected}...').` });
+    }
+  }
+}
+
+function runSupportRules(support, chain, context, config, log) {
+  const ri = support._rowIndex;
+  const coor = support.supportCoor;
+  if (!coor) return;
+
+  let minDist = Infinity;
+  for (const link of chain) {
+    if ((link.element.type || "").toUpperCase() !== "PIPE") continue;
+    const ep1 = link.element.ep1;
+    const ep2 = link.element.ep2;
+    if (!ep1 || !ep2) continue;
+
+    const pipeVec = vec.sub(ep2, ep1);
+    const pipeLen = vec.mag(pipeVec);
+    if (pipeLen < 0.1) continue;
+
+    const toSupport = vec.sub(coor, ep1);
+    const t = vec.dot(toSupport, pipeVec) / (pipeLen * pipeLen);
+    const projection = vec.add(ep1, vec.scale(pipeVec, Math.max(0, Math.min(1, t))));
+    const perpDist = vec.dist(coor, projection);
+
+    if (perpDist < minDist) minDist = perpDist;
+  }
+
+  if (minDist > 5.0 && minDist < Infinity) {
+    log.push({ type: "Error", ruleId: "R-TOP-06", tier: 4, row: ri, message: `ERROR [R-TOP-06]: Support is ${Number(minDist).toFixed(1)}mm off the nearest pipe axis.` });
+  }
+
+  if (context.travelAxis === "Z") {
+    log.push({ type: "Warning", ruleId: "R-SPA-03", tier: 3, row: ri, message: `WARNING [R-SPA-03]: Support on vertical pipe run. Verify support type.` });
+  }
+}
+
+function runAggregateRules(chain, context, config, log) {
+  const cfg = config.smartFixer || {};
+  const chainId = context.chainId;
+
+  if (context.pipeLengthSum <= 0 && chain.length > 0) {
+    log.push({ type: "Error", ruleId: "R-AGG-01", tier: 4, row: chain[0]?.element?._rowIndex, message: `ERROR [R-AGG-01]: ${chainId} has zero pipe length. Fundamentally broken.` });
+  }
+
+  if (chain.length >= 2) {
+    const startPt = getEntryPoint(chain[0].element);
+    const endPt = getExitPoint(chain[chain.length - 1].element);
+    if (startPt && endPt) {
+      const expected = vec.sub(endPt, startPt);
+      const actual = context.cumulativeVector;
+      const error = vec.mag(vec.sub(expected, actual));
+      const closureWarn = cfg.closureWarningThreshold ?? 5.0;
+      const closureErr = cfg.closureErrorThreshold ?? 50.0;
+      if (error > closureErr) {
+        log.push({ type: "Error", ruleId: "R-AGG-03", tier: 4, row: chain[0]?.element?._rowIndex, message: `ERROR [R-AGG-03]: ${chainId} closure error ${Number(error).toFixed(1)}mm.` });
+      } else if (error > closureWarn) {
+        log.push({ type: "Warning", ruleId: "R-AGG-03", tier: 3, row: chain[0]?.element?._rowIndex, message: `WARNING [R-AGG-03]: ${chainId} closure error ${Number(error).toFixed(1)}mm.` });
+      }
+    }
+  }
+
+  if (chain.length > 0) {
+    const lastElem = chain[chain.length - 1].element;
+    const lastType = (lastElem.type || "").toUpperCase();
+    if (lastType === "PIPE") {
+      log.push({ type: "Warning", ruleId: "R-TOP-01", tier: 3, row: lastElem._rowIndex, message: `WARNING [R-TOP-01]: ${chainId} ends at bare PIPE. Expected terminal fitting.` });
+    }
+  }
+
+  const midFlanges = chain.filter((link, i) => {
+    return (link.element.type || "").toUpperCase() === "FLANGE" && i > 0 && i < chain.length - 1;
+  });
+  if (midFlanges.length % 2 !== 0) {
+    log.push({ type: "Warning", ruleId: "R-AGG-05", tier: 3, row: midFlanges[0]?.element?._rowIndex, message: `WARNING [R-AGG-05]: ${chainId} has ${midFlanges.length} mid-chain flanges (odd). Missing mating flange?` });
+  }
+
+  const chainLenM = vec.mag(context.cumulativeVector) / 1000;
+  if (chainLenM > ((cfg.noSupportAlertLength ?? 10000) / 1000)) {
+    log.push({ type: "Warning", ruleId: "R-AGG-06", tier: 3, row: chain[0]?.element?._rowIndex, message: `WARNING [R-AGG-06]: ${chainId} is ${Number(chainLenM).toFixed(1)}m long. Verify supports are included.` });
+  }
+}
+
+// Region G: Fix Application Engine
+function applyFixesEngine(dataTable, chains, config, log) {
+  const applied = [];
+  const newRows = [];
+  const deleteRows = new Set();
+
+  for (const chain of chains) {
+    for (const link of chain) {
+      const elem = link.element;
+      if (elem._proposedFix?.type === "DELETE" && elem._proposedFix.tier <= 2) {
+        deleteRows.add(elem._rowIndex);
+        applied.push({ ruleId: elem._proposedFix.ruleId, row: elem._rowIndex, action: "DELETE" });
+        log.push({ type: "Applied", ruleId: elem._proposedFix.ruleId, row: elem._rowIndex, message: `APPLIED: Deleted ${elem.type} at Row ${elem._rowIndex}.` });
+      }
+    }
+  }
+
+  for (const chain of chains) {
+    for (const link of chain) {
+      const elem = link.element;
+      if (elem._proposedFix?.type === "SNAP_AXIS" && elem._proposedFix.tier <= 2) {
+        const axis = elem._proposedFix.dominantAxis;
+        snapToSingleAxis(elem, axis);
+        markModified(elem, "ep1", "SmartFix:R-GEO-03");
+        markModified(elem, "ep2", "SmartFix:R-GEO-03");
+        applied.push({ ruleId: "R-GEO-03", row: elem._rowIndex, action: "SNAP_AXIS" });
+      }
+    }
+  }
+
+  for (const chain of chains) {
+    for (const link of chain) {
+      if (!link.fixAction) continue;
+      if (link.fixAction.type === "SNAP" && link.fixAction.tier <= 2) {
+        snapEndpoints(link.element, link.nextElement);
+        markModified(link.element, "ep2", `SmartFix:${link.fixAction.ruleId}`);
+        markModified(link.nextElement, "ep1", `SmartFix:${link.fixAction.ruleId}`);
+        applied.push({ ruleId: link.fixAction.ruleId, row: link.element._rowIndex, action: "SNAP" });
+      }
+    }
+  }
+
+  for (const chain of chains) {
+    for (const link of chain) {
+      if (!link.fixAction) continue;
+      if (link.fixAction.type === "TRIM" && link.fixAction.tier <= 2) {
+        const target = link.fixAction.trimTarget === "current" ? link.element : link.nextElement;
+        if ((target.type || "").toUpperCase() === "PIPE") {
+          trimPipe(target, link.fixAction.trimAmount, link.travelAxis, link.travelDirection, link.fixAction.trimTarget);
+          markModified(target, link.fixAction.trimTarget === "current" ? "ep2" : "ep1", `SmartFix:${link.fixAction.ruleId}`);
+          applied.push({ ruleId: link.fixAction.ruleId, row: target._rowIndex, action: "TRIM" });
+          log.push({ type: "Applied", ruleId: link.fixAction.ruleId, row: target._rowIndex, message: `APPLIED: Trimmed ${target.type} by ${Number(link.fixAction.trimAmount).toFixed(1)}mm.` });
+
+          const remaining = vec.mag(getElementVector(target));
+          if (remaining < (config.smartFixer?.microPipeThreshold ?? 6.0)) {
+            deleteRows.add(target._rowIndex);
+            log.push({ type: "Applied", ruleId: "R-OVR-06", row: target._rowIndex, message: `APPLIED: Pipe reduced to ${Number(remaining).toFixed(1)}mm after trim. Deleted.` });
+          }
+        }
+      }
+    }
+  }
+
+  for (const chain of chains) {
+    for (const link of chain) {
+      if (!link.fixAction) continue;
+      if (link.fixAction.type === "INSERT" && link.fixAction.tier <= 2) {
+        const fillerPipe = createFillerPipe(link, config);
+        newRows.push({ insertAfterRow: link.element._rowIndex, pipe: fillerPipe });
+        applied.push({ ruleId: link.fixAction.ruleId, row: link.element._rowIndex, action: "INSERT" });
+        log.push({ type: "Applied", ruleId: link.fixAction.ruleId, row: link.element._rowIndex, message: `APPLIED: Inserted ${Number(link.fixAction.gapAmount).toFixed(1)}mm gap-fill pipe after Row ${link.element._rowIndex}.` });
+      }
+    }
+  }
+
+  let updatedTable = dataTable.filter(row => !deleteRows.has(row._rowIndex));
+  for (const insertion of newRows.sort((a, b) => b.insertAfterRow - a.insertAfterRow)) {
+    const idx = updatedTable.findIndex(r => r._rowIndex === insertion.insertAfterRow);
+    if (idx >= 0) {
+      updatedTable.splice(idx + 1, 0, insertion.pipe);
+    } else {
+      updatedTable.push(insertion.pipe);
+    }
+  }
+
+  updatedTable.forEach((row, i) => { row._rowIndex = i + 1; });
+  updatedTable.forEach(row => {
+    row.fixingAction = null;
+    row.fixingActionTier = null;
+    row.fixingActionRuleId = null;
+  });
+
+  return { updatedTable, applied, deleteCount: deleteRows.size, insertCount: newRows.length };
+}
+
+function snapEndpoints(elemA, elemB) {
+  const mid = vec.mid(getExitPoint(elemA), getEntryPoint(elemB));
+  if (elemA.ep2) { elemA.ep2 = { ...mid }; }
+  if (elemB.ep1) { elemB.ep1 = { ...mid }; }
+}
+
+function snapToSingleAxis(element, dominantAxis) {
+  if (!element.ep1 || !element.ep2) return;
+  const axes = ["x", "y", "z"];
+  const domKey = dominantAxis.toLowerCase();
+  for (const key of axes) {
+    if (key !== domKey) element.ep2[key] = element.ep1[key];
+  }
+}
+
+function trimPipe(pipe, amount, travelAxis, travelDir, which) {
+  const axisKey = travelAxis.toLowerCase();
+  if (which === "current") {
+    pipe.ep2[axisKey] -= amount * travelDir;
+  } else {
+    pipe.ep1[axisKey] += amount * travelDir;
+  }
+}
+
+function createFillerPipe(chainLink, config) {
+  const upstream = chainLink.element;
+  const downstream = chainLink.nextElement;
+  const exitPt = getExitPoint(upstream);
+  const entryPt = getEntryPoint(downstream);
+
+  return {
+    _rowIndex: -1,
+    _modified: { ep1: "SmartFix:GapFill", ep2: "SmartFix:GapFill", type: "SmartFix:GapFill" },
+    _logTags: ["Calculated"],
+    csvSeqNo: `${upstream.csvSeqNo || 0}.GF`,
+    type: "PIPE",
+    text: "",
+    refNo: `${upstream.refNo || "UNKNOWN"}_GapFill`,
+    bore: upstream.bore || 0,
+    ep1: { ...exitPt },
+    ep2: { ...entryPt },
+    cp: null, bp: null, branchBore: null,
+    skey: "",
+    supportCoor: null, supportName: "", supportGuid: "",
+    ca: { ...upstream.ca, 8: null, 97: null, 98: null },
+    fixingAction: "GAPFILLING",
+    fixingActionTier: null,
+    fixingActionRuleId: null,
+    len1: null, axis1: null, len2: null, axis2: null, len3: null, axis3: null,
+    brlen: null, deltaX: null, deltaY: null, deltaZ: null,
+    diameter: upstream.bore, wallThick: upstream.ca?.[4] || null,
+    bendPtr: null, rigidPtr: null, intPtr: null,
+  };
+}
+
+// Region H: Fixing Action Descriptor
+function populateFixingActions(dataTable, chains, log) {
+  for (const row of dataTable) {
+    row.fixingAction = null;
+    row.fixingActionTier = null;
+    row.fixingActionRuleId = null;
+  }
+
+  function processChainLinkActions(chainLinks) {
+    for (const link of chainLinks) {
+      const elem = link.element;
+
+      if (elem._proposedFix) {
+        const row = dataTable.find(r => r._rowIndex === elem._rowIndex);
+        if (row) {
+          row.fixingAction = formatProposedFix(elem._proposedFix, elem);
+          row.fixingActionTier = elem._proposedFix.tier;
+          row.fixingActionRuleId = elem._proposedFix.ruleId;
+        }
+      }
+
+      if (link.fixAction) {
+        const currRow = dataTable.find(r => r._rowIndex === link.element._rowIndex);
+        const nextRow = link.nextElement ? dataTable.find(r => r._rowIndex === link.nextElement._rowIndex) : null;
+
+        if (currRow && !currRow.fixingAction) {
+          currRow.fixingAction = link.fixAction.description;
+          currRow.fixingActionTier = link.fixAction.tier;
+          currRow.fixingActionRuleId = link.fixAction.ruleId;
+        }
+        if (nextRow && !nextRow.fixingAction && link.fixAction.tier <= 3) {
+          nextRow.fixingAction = `← ${link.fixAction.description.split('\n')[0]}`;
+          nextRow.fixingActionTier = link.fixAction.tier;
+          nextRow.fixingActionRuleId = link.fixAction.ruleId;
+        }
+      }
+
+      if (link.branchChain) {
+        processChainLinkActions(link.branchChain);
+      }
+    }
+  }
+
+  for (const chain of chains) {
+    processChainLinkActions(chain);
+  }
+
+  for (const entry of log) {
+    if (entry.row && entry.tier && entry.tier <= 4) {
+      const row = dataTable.find(r => r._rowIndex === entry.row);
+      if (row && !row.fixingAction) {
+        row.fixingAction = entry.message;
+        row.fixingActionTier = entry.tier;
+        row.fixingActionRuleId = entry.ruleId;
+      }
+    }
+  }
+}
+
+function formatProposedFix(fix, element) {
+  const type = (element.type || "").toUpperCase();
+  const ri = element._rowIndex;
+
+  switch (fix.type) {
+    case "DELETE":
+      const len = element.ep1 && element.ep2 ? vec.mag(vec.sub(element.ep2, element.ep1)) : 0;
+      return `DELETE [${fix.ruleId}]: Remove ${type} at Row ${ri}\n  Length: ${Number(len).toFixed(1)}mm, Bore: ${element.bore || 0}mm\n  Reason: ${fix.ruleId === "R-GEO-01" ? "Micro-element below threshold" : "Fold-back element"}`;
+    case "SNAP_AXIS":
+      return `SNAP [${fix.ruleId}]: Align ${type} to pure ${fix.dominantAxis}-axis\n  Row ${ri}: Off-axis components will be zeroed\n  EP2 non-${fix.dominantAxis} coords → match EP1`;
+    default:
+      return `${fix.type} [${fix.ruleId}]: Row ${ri}`;
+  }
+}
+
+function buildInsertDescription(gapAmt, direction, context, upstream) {
+  const exitPt = getExitPoint(upstream);
+  const bore = upstream.bore || 0;
+  const axisKey = context.travelAxis.toLowerCase();
+  const endPt = { ...exitPt };
+  endPt[axisKey] += gapAmt * context.travelDirection;
+
+  return `INSERT [R-GAP-02]: Fill ${Number(gapAmt).toFixed(1)}mm gap along ${direction}\n  New PIPE: EP1=(${Number(exitPt.x).toFixed(1)}, ${Number(exitPt.y).toFixed(1)}, ${Number(exitPt.z).toFixed(1)})\n          → EP2=(${Number(endPt.x).toFixed(1)}, ${Number(endPt.y).toFixed(1)}, ${Number(endPt.z).toFixed(1)})\n  Length: ${Number(gapAmt).toFixed(1)}mm, Bore: ${Number(bore).toFixed(1)}mm\n  Inherited from Row ${upstream._rowIndex}`;
+}
+
+function buildTrimDescription(overlapAmt, direction, current, next, target) {
+  const trimRow = target === "current" ? current : next;
+  const otherRow = target === "current" ? next : current;
+  return `TRIM [${target === "current" ? "R-OVR-01" : "R-OVR-02"}]: Reduce ${trimRow.type} by ${Number(overlapAmt).toFixed(1)}mm along ${direction}\n  Row ${trimRow._rowIndex}: ${target === "current" ? "EP2" : "EP1"} adjusted\n  Overlap with ${otherRow.type} (Row ${otherRow._rowIndex}) resolved`;
+}
+
+// Region I: Smart Fix Orchestrator
+function runSmartFix(dataTable, config, log) {
+  log.push({ type: "Info", message: "═══ SMART FIX: Starting chain walker ═══" });
+
+  log.push({ type: "Info", message: "Step 4A: Building connectivity graph..." });
+  const graph = buildConnectivityGraph(dataTable, config);
+  log.push({ type: "Info", message: `Graph: ${graph.components.length} components, ${graph.terminals.length} terminals, ${graph.edges.size} connections.` });
+
+  log.push({ type: "Info", message: "Step 4B: Walking element chains..." });
+  const { chains, orphans } = walkAllChains(graph, config, log);
+
+  // Recursively count total elements walked across all branch chains
+  function countElementsInChains(chainsToCount) {
+    let sum = 0;
+    for (const chain of chainsToCount) {
+       sum += chain.length;
+       for (const link of chain) {
+         if (link.branchChain) sum += countElementsInChains([link.branchChain]);
+       }
+    }
+    return sum;
+  }
+  const totalElements = countElementsInChains(chains);
+  log.push({ type: "Info", message: `Walked ${chains.length} chains, ${totalElements} elements, ${orphans.length} orphans.` });
+
+  const tierCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  for (const entry of log) {
+    if (entry.tier) tierCounts[entry.tier]++;
+  }
+  log.push({ type: "Info", message: `Rules complete: Tier1=${tierCounts[1]}, Tier2=${tierCounts[2]}, Tier3=${tierCounts[3]}, Tier4=${tierCounts[4]}` });
+
+  log.push({ type: "Info", message: "Step 4D: Populating Fixing Action previews..." });
+  populateFixingActions(dataTable, chains, log);
+
+  const actionCount = dataTable.filter(r => r.fixingAction).length;
+  log.push({ type: "Info", message: `═══ SMART FIX COMPLETE: ${actionCount} rows have proposed fixes. Review in Data Table. ═══` });
+
+  const summary = {
+    chainCount: chains.length,
+    elementsWalked: totalElements,
+    orphanCount: orphans.length,
+    tier1: tierCounts[1],
+    tier2: tierCounts[2],
+    tier3: tierCounts[3],
+    tier4: tierCounts[4],
+    rowsWithActions: actionCount,
+  };
+
+  return { graph, chains, orphans, summary };
+}
 
 // String similarity (Sørensen–Dice coefficient)
 function getBigrams(str) {
@@ -375,7 +1266,7 @@ function isUsedField(type, field) {
 }
 
 function calculateTotalLength(row) {
-  if (isValidCoord(row.ep1) && isValidCoord(row.ep2)) return vecDist(row.ep1, row.ep2);
+  if (isValidCoord(row.ep1) && isValidCoord(row.ep2)) return vec.dist(row.ep1, row.ep2);
   return null;
 }
 
@@ -392,14 +1283,8 @@ function lenAxisToDelta(len, axis) {
   return 0;
 }
 
-function detectBranchDirection(row, dataTable) {
-  // Simplistic assumption: mostly perpendicular to header in Z or Y
-  // Ideally derived from connected component, but fallback to "UP"
-  return {x: 0, y: 0, z: 1};
-}
-
 function calcBranchPoint(cp, brlen, dirVec) {
-  return vecAdd(cp, vecScale(vecNormalize(dirVec), brlen));
+  return vec.add(cp, vec.scale(vec.normalize(dirVec), brlen));
 }
 
 function calcBendCp(ep1, ep2, dataTable, rowIndex) {
@@ -437,8 +1322,7 @@ function lookupBrlen(row, config) {
   return null;
 }
 
-function runFixerPipeline(dataTable, config, log) {
-  let prevEP2 = null;
+function runPreFixerSteps(dataTable, config, log) {
   const stdMm = new Set(config.standardMmBores);
 
   // Step 1 & 2: Parse and verify MESSAGE-SQUARE
@@ -497,6 +1381,10 @@ function runFixerPipeline(dataTable, config, log) {
       log.push({ type: "Warning", row: row._rowIndex, message: `Bore ${oldBore} appears to be inches. Converted to ${row.bore} mm.` });
     }
   }
+}
+
+function runPostFixerSteps(dataTable, config, log) {
+  let prevEP2 = null;
 
   // Step 5: Bi-Directional Coordinate Calculation
   for (const row of dataTable) {
@@ -541,13 +1429,13 @@ function runFixerPipeline(dataTable, config, log) {
   for (const row of dataTable) {
     if (row.type === "TEE") {
       if (!isValidCoord(row.cp) && isValidCoord(row.ep1) && isValidCoord(row.ep2)) {
-        row.cp = midpoint(row.ep1, row.ep2);
+        row.cp = vec.mid(row.ep1, row.ep2);
         markModified(row, "cp", "Calculated");
         log.push({ type: "Calculated", row: row._rowIndex, message: `TEE CP calculated as midpoint: (${fmtCoord(row.cp)}).` });
       }
       if (!isValidCoord(row.bp) && isValidCoord(row.cp)) {
         const brlen = row.brlen || lookupBrlen(row, config) || 50; // default to 50 if unknown
-        const brDir = detectBranchDirection(row, dataTable);
+        const brDir = {x: 0, y: 0, z: 1}; // Simplistic assumption for vector calc
         row.bp = calcBranchPoint(row.cp, brlen, brDir);
         row.brlen = brlen;
         markModified(row, "bp", "Calculated");
@@ -563,7 +1451,7 @@ function runFixerPipeline(dataTable, config, log) {
     if (row.type === "BEND") {
       if (!isValidCoord(row.cp) && isValidCoord(row.ep1) && isValidCoord(row.ep2)) {
          // simple midpoint fallback if no incoming axis
-         row.cp = midpoint(row.ep1, row.ep2);
+         row.cp = vec.mid(row.ep1, row.ep2);
          markModified(row, "cp", "Calculated");
       }
     }
@@ -639,20 +1527,20 @@ function runValidation(dataTable, config, log) {
       if (coordsEqual(row.cp, row.ep1)) results.push({ id: "V4", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP1 — degenerate bend.` });
       if (coordsEqual(row.cp, row.ep2)) results.push({ id: "V5", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP2 — degenerate bend.` });
 
-      const v1 = vecSub(row.ep1, row.cp);
-      const v2 = vecSub(row.ep2, row.cp);
-      if (vecMag(vecCross(v1, v2)) < 0.001) results.push({ id: "V6", severity: "ERROR", row: row._rowIndex, message: `BEND CP is collinear with EPs — degenerate straight pipe.` });
+      const v1 = vec.sub(row.ep1, row.cp);
+      const v2 = vec.sub(row.ep2, row.cp);
+      if (vec.mag(vec.cross(v1, v2)) < 0.001) results.push({ id: "V6", severity: "ERROR", row: row._rowIndex, message: `BEND CP is collinear with EPs — degenerate straight pipe.` });
 
-      const d1 = vecDist(row.cp, row.ep1);
-      const d2 = vecDist(row.cp, row.ep2);
-      if (Math.abs(d1 - d2) > 1.0) results.push({ id: "V7", severity: "WARNING", row: row._rowIndex, message: `BEND radius inconsistent: dist(CP,EP1)=${d1.toFixed(2)} vs dist(CP,EP2)=${d2.toFixed(2)}.` });
+      const d1 = vec.dist(row.cp, row.ep1);
+      const d2 = vec.dist(row.cp, row.ep2);
+      if (Math.abs(d1 - d2) > 1.0) results.push({ id: "V7", severity: "WARNING", row: row._rowIndex, message: `BEND radius inconsistent: dist(CP,EP1)=${Number(d1).toFixed(2)} vs dist(CP,EP2)=${Number(d2).toFixed(2)}.` });
     }
 
     // V8, V9, V10: TEE checks
     if (row.type === "TEE") {
       if (isValidCoord(row.cp) && isValidCoord(row.ep1) && isValidCoord(row.ep2)) {
-        const expectedCp = midpoint(row.ep1, row.ep2);
-        if (!coordsApproxEqual(row.cp, expectedCp, 1.0)) results.push({ id: "V8", severity: "ERROR", row: row._rowIndex, message: `TEE CP is not midpoint of EP1/EP2. Expected (${fmtCoord(expectedCp)}).` });
+        const expectedCp = vec.mid(row.ep1, row.ep2);
+        if (!vec.approxEqual(row.cp, expectedCp, 1.0)) results.push({ id: "V8", severity: "ERROR", row: row._rowIndex, message: `TEE CP is not midpoint of EP1/EP2. Expected (${fmtCoord(expectedCp)}).` });
 
         // V9: TEE CP bore = EP bore
         // In our data model, `row.bore` represents the EP bore.
@@ -664,9 +1552,9 @@ function runValidation(dataTable, config, log) {
 
         // V10: TEE BP perpendicular
         if (row.bp && isValidCoord(row.bp)) {
-           const bpVec = vecSub(row.bp, row.cp);
-           const epVec = vecSub(row.ep2, row.ep1);
-           if (Math.abs(vecDot(bpVec, epVec)) > 0.01 * vecMag(bpVec) * vecMag(epVec)) {
+           const bpVec = vec.sub(row.bp, row.cp);
+           const epVec = vec.sub(row.ep2, row.ep1);
+           if (Math.abs(vec.dot(bpVec, epVec)) > 0.01 * vec.mag(bpVec) * vec.mag(epVec)) {
               results.push({ id: "V10", severity: "WARNING", row: row._rowIndex, message: `TEE BP is not perpendicular to header.` });
            }
         }
@@ -852,7 +1740,16 @@ const initialState = {
   importMode: null,
   status: "Ready",
   previewModalData: null, // { file, rows, mappings, rawHeaders }
-  logFilter: "All"
+  logFilter: "All",
+  smartFix: {
+    status: "idle",
+    graph: null,
+    chains: [],
+    proposedFixes: [],
+    appliedFixes: [],
+    chainSummary: null,
+    fixSummary: null
+  }
 };
 
 function reducer(state, action) {
@@ -898,6 +1795,36 @@ function reducer(state, action) {
       return { ...state, config: { ...state.config, ...action.payload } };
     case 'RESET_CONFIG':
       return { ...state, config: { ...DEFAULT_CONFIG } };
+    case 'SET_SMART_FIX_STATUS':
+      return { ...state, smartFix: { ...state.smartFix, status: action.payload } };
+    case 'SMART_FIX_COMPLETE':
+      return {
+        ...state,
+        dataTable: action.payload.dataTable,
+        log: action.payload.log,
+        smartFix: {
+          ...state.smartFix,
+          status: 'previewing',
+          graph: action.payload.graph,
+          chains: action.payload.chains,
+          chainSummary: action.payload.summary
+        }
+      };
+    case 'FIXES_APPLIED':
+      return {
+        ...state,
+        dataTable: action.payload.updatedTable,
+        smartFix: {
+          ...state.smartFix,
+          status: 'applied',
+          appliedFixes: action.payload.applied,
+          fixSummary: {
+            deleteCount: action.payload.deleteCount,
+            insertCount: action.payload.insertCount,
+            totalApplied: action.payload.applied.length
+          }
+        }
+      };
     default: return state;
   }
 }
@@ -994,7 +1921,7 @@ export default function App() {
         ep1: { ...NULL_COORD }, ep2: { ...NULL_COORD }, cp: { ...NULL_COORD }, bp: { ...NULL_COORD },
         skey: "", supportCoor: { ...NULL_COORD }, supportName: "", supportGuid: "",
         ca: { 1: null, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 8: null, 9: null, 10: null, 97: null, 98: null },
-        fixingAction: "", csvSeqNo: null
+        fixingAction: null, fixingActionTier: null, fixingActionRuleId: null, csvSeqNo: null
       };
 
       mappings.forEach((colCanonical, idx) => {
@@ -1033,12 +1960,13 @@ export default function App() {
     dispatch({ type: 'CONFIRM_EXCEL_IMPORT', payload: { dataTable: importedData, headerRows: newHeaderRows } });
   };
 
-  const runFixer = () => {
-    dispatch({ type: 'SET_STATUS', payload: "Fixing & Validating..." });
+  const runBasicFixer = () => {
+    dispatch({ type: 'SET_STATUS', payload: "Running Basic Fixes..." });
     const tableCopy = JSON.parse(JSON.stringify(dataTable));
     const runLog = [];
 
-    runFixerPipeline(tableCopy, config, runLog);
+    runPreFixerSteps(tableCopy, config, runLog);
+    runPostFixerSteps(tableCopy, config, runLog);
     const vResults = runValidation(tableCopy, config, runLog);
 
     vResults.forEach(r => {
@@ -1056,7 +1984,71 @@ export default function App() {
         validationResults: vResults,
         finalPcf: generated,
         tally: newTally,
-        status: `Validated: ${vResults.filter(r=>r.severity==='ERROR').length} errors, ${vResults.filter(r=>r.severity==='WARNING').length} warnings.`
+        status: `Basic Fixes: ${vResults.filter(r=>r.severity==='ERROR').length} errors, ${vResults.filter(r=>r.severity==='WARNING').length} warnings.`
+      }
+    });
+  };
+
+  const handleSmartFix = () => {
+    dispatch({ type: 'SET_SMART_FIX_STATUS', payload: 'running' });
+    const tableCopy = JSON.parse(JSON.stringify(dataTable));
+    const runLog = [...log];
+
+    runPreFixerSteps(tableCopy, config, runLog);
+
+    // Core insertion
+    const result = runSmartFix(tableCopy, config, runLog);
+
+    dispatch({
+      type: 'SMART_FIX_COMPLETE',
+      payload: {
+        graph: result.graph,
+        chains: result.chains,
+        summary: result.summary,
+        dataTable: tableCopy,
+        log: runLog
+      }
+    });
+  };
+
+  const handleApplyFixes = () => {
+    dispatch({ type: 'SET_SMART_FIX_STATUS', payload: 'applying' });
+    const tableCopy = JSON.parse(JSON.stringify(dataTable));
+    const runLog = [...log];
+
+    const result = applyFixesEngine(tableCopy, state.smartFix.chains, config, runLog);
+
+    // Rerun post steps and validations since we modified the table
+    runPostFixerSteps(result.updatedTable, config, runLog);
+    const vResults = runValidation(result.updatedTable, config, runLog);
+
+    vResults.forEach(r => {
+      runLog.push({ type: r.severity === "ERROR" ? "Error" : r.severity === "WARNING" ? "Warning" : "Info", row: r.row, message: `[${r.id}] ${r.message}` });
+    });
+
+    const generated = generatePcf(result.updatedTable, headerRows, config);
+    const newTally = calculateTally(result.updatedTable, rawPcf, generated);
+
+    dispatch({
+      type: 'FIXES_APPLIED',
+      payload: {
+        updatedTable: result.updatedTable,
+        applied: result.applied,
+        deleteCount: result.deleteCount,
+        insertCount: result.insertCount
+      }
+    });
+
+    // Also update the core state from the run
+    dispatch({
+      type: 'RUN_FIXER',
+      payload: {
+        dataTable: result.updatedTable,
+        log: runLog,
+        validationResults: vResults,
+        finalPcf: generated,
+        tally: newTally,
+        status: `Fixes Applied! ${result.applied.length} fixes executed. Validation: ${vResults.filter(r=>r.severity==='ERROR').length} errors.`
       }
     });
   };
@@ -1228,12 +2220,12 @@ export default function App() {
                  <thead className="bg-gray-100 sticky top-0 z-10 shadow-sm text-xs">
                    <tr>
                      <th colSpan="4" className="p-1 border border-gray-300 text-center bg-gray-200">Identity</th>
+                     <th colSpan="1" className="p-1 border border-gray-300 text-center bg-[#0077B6] text-white">Smart Fix Preview</th>
                      <th colSpan="2" className="p-1 border border-gray-300 text-center bg-gray-200">Reference</th>
                      <th colSpan="5" className="p-1 border border-gray-300 text-center bg-gray-200">Geometry</th>
                      <th colSpan="1" className="p-1 border border-gray-300 text-center bg-gray-200">Fitting</th>
                      <th colSpan="2" className="p-1 border border-gray-300 text-center bg-gray-200">Support</th>
                      <th colSpan="12" className="p-1 border border-gray-300 text-center bg-gray-200">Attributes</th>
-                     <th colSpan="1" className="p-1 border border-gray-300 text-center bg-gray-200">Actions</th>
                      <th colSpan="7" className="p-1 border border-gray-300 text-center bg-gray-200">Calculated</th>
                      <th colSpan="3" className="p-1 border border-gray-300 text-center bg-gray-200">Deltas</th>
                      <th colSpan="2" className="p-1 border border-gray-300 text-center bg-gray-200">Derived</th>
@@ -1244,6 +2236,8 @@ export default function App() {
                      <th className="p-2 border border-gray-300 sticky left-[40px] bg-gray-100 z-20 shadow-[1px_0_0_#d1d5db]">CSV SEQ NO</th>
                      <th className="p-2 border border-gray-300 sticky left-[120px] bg-gray-100 z-20 shadow-[1px_0_0_#d1d5db]">Type</th>
                      <th className="p-2 border border-gray-300">TEXT</th>
+
+                     <th className="p-2 border border-gray-300 bg-blue-50 text-[#0077B6] font-bold">Fixing Action</th>
 
                      <th className="p-2 border border-gray-300">PIPELINE-REFERENCE</th>
                      <th className="p-2 border border-gray-300">REF NO.</th>
@@ -1265,8 +2259,6 @@ export default function App() {
                      <th className="p-2 border border-gray-300">CA7</th><th className="p-2 border border-gray-300">CA8</th>
                      <th className="p-2 border border-gray-300">CA9</th><th className="p-2 border border-gray-300">CA10</th>
                      <th className="p-2 border border-gray-300">CA97</th><th className="p-2 border border-gray-300">CA98</th>
-
-                     <th className="p-2 border border-gray-300">Fixing Action</th>
 
                      <th className="p-2 border border-gray-300">LEN1</th><th className="p-2 border border-gray-300">AXIS1</th>
                      <th className="p-2 border border-gray-300">LEN2</th><th className="p-2 border border-gray-300">AXIS2</th>
@@ -1292,12 +2284,44 @@ export default function App() {
                      };
                      const getTitle = (field) => r._modified[field] ? `[${r._modified[field]}] modified` : '';
 
+                     const renderFixingAction = (val, tier, ruleId) => {
+                       if (!val) return <span className="text-gray-400">—</span>;
+                       const tierColors = {
+                         1: { bg: "#D4EDDA", text: "#155724", border: "#28A745", label: "AUTO" },
+                         2: { bg: "#FFF3CD", text: "#856404", border: "#FFC107", label: "FIX" },
+                         3: { bg: "#FFE5D0", text: "#856404", border: "#FD7E14", label: "REVIEW" },
+                         4: { bg: "#F8D7DA", text: "#721C24", border: "#DC3545", label: "ERROR" },
+                       };
+                       const colors = tierColors[tier] || tierColors[3];
+                       return (
+                         <div style={{
+                           background: colors.bg, color: colors.text, borderLeft: `3px solid ${colors.border}`,
+                           padding: "4px 8px", fontFamily: "'JetBrains Mono', monospace", fontSize: "0.7rem",
+                           lineHeight: 1.4, whiteSpace: "pre-wrap", maxWidth: 320,
+                         }}>
+                           <span style={{
+                             display: "inline-block", background: colors.border, color: "white", padding: "1px 6px",
+                             borderRadius: 3, fontSize: "0.6rem", fontWeight: 700, marginBottom: 2,
+                           }}>
+                             {colors.label} T{tier}
+                           </span>
+                           {" "}{ruleId}
+                           <br/>
+                           {val}
+                         </div>
+                       );
+                     };
+
                      return (
                        <tr key={i} className="hover:bg-gray-50 text-xs">
                          <td className="p-2 border border-gray-300 sticky left-0 bg-white z-10">{r._rowIndex}</td>
                          <td className={`p-2 border border-gray-300 sticky left-[40px] bg-white z-10 ${getBg('csvSeqNo')}`} title={getTitle('csvSeqNo')}>{r.csvSeqNo}</td>
                          <td className={`p-2 border border-gray-300 sticky left-[120px] bg-white z-10 font-mono font-bold ${getBg('type')}`}>{r.type}</td>
                          <td className={`p-2 border border-gray-300 truncate max-w-[200px] ${getBg('text')}`} title={r.text}>{r.text}</td>
+
+                         <td className="p-2 border border-gray-300 bg-blue-50 align-top">
+                           {renderFixingAction(r.fixingAction, r.fixingActionTier, r.fixingActionRuleId)}
+                         </td>
 
                          <td className={`p-2 border border-gray-300 ${getBg('pipelineRef')}`}>{r.pipelineRef}</td>
                          <td className={`p-2 border border-gray-300 ${getBg('refNo')}`}>{r.refNo}</td>
@@ -1316,8 +2340,6 @@ export default function App() {
                          {[1,2,3,4,5,6,7,8,9,10,97,98].map(ca => (
                             <td key={ca} className={`p-2 border border-gray-300 truncate max-w-[100px] ${getBg('ca'+ca)}`}>{r.ca[ca]}</td>
                          ))}
-
-                         <td className={`p-2 border border-gray-300 ${getBg('fixingAction')}`}>{r.fixingAction}</td>
 
                          <td className={`p-2 border border-gray-300 ${getBg('len1')}`}>{r.len1 != null ? r.len1.toFixed(1) : ''}</td>
                          <td className={`p-2 border border-gray-300 ${getBg('axis1')}`}>{r.axis1}</td>
@@ -1474,6 +2496,36 @@ export default function App() {
                   </label>
                ))}
              </div>
+             {state.smartFix.chainSummary && (
+               <div className="bg-[#242830] p-3 rounded border border-gray-700 mb-2 shadow-sm text-sm">
+                 <h4 className="font-bold text-[#0077B6] mb-2 border-b border-gray-700 pb-1">Smart Fix Summary</h4>
+                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                   <div>
+                     <div className="text-gray-400 text-xs">Chains found</div>
+                     <div className="font-mono">{state.smartFix.chainSummary.chainCount}</div>
+                   </div>
+                   <div>
+                     <div className="text-gray-400 text-xs">Elements walked</div>
+                     <div className="font-mono">{state.smartFix.chainSummary.elementsWalked}</div>
+                   </div>
+                   <div>
+                     <div className="text-gray-400 text-xs">Orphan elements</div>
+                     <div className="font-mono">{state.smartFix.chainSummary.orphanCount}</div>
+                   </div>
+                   <div>
+                     <div className="text-gray-400 text-xs">Rows with proposed fixes</div>
+                     <div className="font-mono font-bold">{state.smartFix.chainSummary.rowsWithActions}</div>
+                   </div>
+                 </div>
+                 <div className="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-gray-700 text-xs">
+                    <div className="text-[#28A745]">Tier 1 (auto-silent): <b>{state.smartFix.chainSummary.tier1}</b></div>
+                    <div className="text-[#FFC107]">Tier 2 (auto-logged): <b>{state.smartFix.chainSummary.tier2}</b></div>
+                    <div className="text-[#FD7E14]">Tier 3 (warnings): <b>{state.smartFix.chainSummary.tier3}</b></div>
+                    <div className="text-[#DC3545]">Tier 4 (errors): <b>{state.smartFix.chainSummary.tier4}</b></div>
+                 </div>
+               </div>
+             )}
+
              <div className="flex-1 bg-[#242830] rounded border border-gray-700 overflow-auto min-h-[300px]">
                <div className="p-2 border-b border-gray-700 sticky top-0 bg-[#242830] font-bold text-gray-400 text-xs flex gap-2">
                  <span>LOG TABLE</span>
@@ -1579,8 +2631,22 @@ export default function App() {
           <button onClick={exportPcf} disabled={!finalPcf} className="disabled:opacity-50 text-gray-300 hover:text-white flex items-center gap-1 transition-colors">
             <Download className="w-4 h-4" /> Export PCF
           </button>
-          <button onClick={runFixer} disabled={dataTable.length === 0} className="disabled:opacity-50 bg-[#0077B6] hover:bg-blue-600 text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors">
+          <button onClick={runBasicFixer} disabled={dataTable.length === 0} className="disabled:opacity-50 text-gray-300 hover:text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors">
             <Play className="w-4 h-4 fill-current" /> Run Validator
+          </button>
+          <button
+            onClick={handleSmartFix}
+            disabled={dataTable.length === 0 || state.smartFix.status === "running"}
+            className="disabled:opacity-50 bg-[#0077B6] hover:bg-blue-600 text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors"
+          >
+            {state.smartFix.status === "running" ? "Analyzing..." : "Smart Fix 🔧"}
+          </button>
+          <button
+            onClick={handleApplyFixes}
+            disabled={state.smartFix.status !== "previewing"}
+            className="disabled:opacity-50 bg-[#28A745] hover:bg-green-600 text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors"
+          >
+            {state.smartFix.status === "applying" ? "Applying..." : "Apply Fixes ✓"}
           </button>
         </div>
       </div>
