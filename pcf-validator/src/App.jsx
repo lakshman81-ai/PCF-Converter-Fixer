@@ -130,10 +130,6 @@ const vec = {
 function isValidCoord(c) {
   return c && c.x != null && c.y != null && c.z != null;
 }
-function coordsEqual(a, b) {
-  if (!a || !b) return false;
-  return a.x === b.x && a.y === b.y && a.z === b.z;
-}
 
 // Format number utility
 const fmtCoordStr = (c, dec = 4) => (c && c.x != null && c.y != null && c.z != null) ? `${Number(c.x).toFixed(dec)}, ${Number(c.y).toFixed(dec)}, ${Number(c.z).toFixed(dec)}` : '';
@@ -1524,8 +1520,8 @@ function runValidation(dataTable, config, log) {
 
     // V4, V5, V6, V7: BEND checks
     if (row.type === "BEND" && isValidCoord(row.cp) && isValidCoord(row.ep1) && isValidCoord(row.ep2)) {
-      if (coordsEqual(row.cp, row.ep1)) results.push({ id: "V4", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP1 — degenerate bend.` });
-      if (coordsEqual(row.cp, row.ep2)) results.push({ id: "V5", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP2 — degenerate bend.` });
+      if (vec.approxEqual(row.cp, row.ep1, 0.01)) results.push({ id: "V4", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP1 — degenerate bend.` });
+      if (vec.approxEqual(row.cp, row.ep2, 0.01)) results.push({ id: "V5", severity: "ERROR", row: row._rowIndex, message: `BEND CP equals EP2 — degenerate bend.` });
 
       const v1 = vec.sub(row.ep1, row.cp);
       const v2 = vec.sub(row.ep2, row.cp);
@@ -1587,7 +1583,7 @@ function runValidation(dataTable, config, log) {
     }
 
     // V15: Coordinate continuity
-    if (prevEP2 && isValidCoord(row.ep1) && !coordsApproxEqual(row.ep1, prevEP2, 1.0)) {
+    if (prevEP2 && isValidCoord(row.ep1) && !vec.approxEqual(row.ep1, prevEP2, 1.0)) {
       results.push({ id: "V15", severity: "WARNING", row: row._rowIndex, message: `Coordinate discontinuity: EP1 (${fmtCoord(row.ep1)}) differs from prev EP2 (${fmtCoord(prevEP2)}).` });
     }
     if (isValidCoord(row.ep2) && row.type !== "SUPPORT" && row.type !== "OLET") {
