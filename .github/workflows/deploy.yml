@@ -43,6 +43,9 @@ jobs:
         working-directory: ./pcf-validator
         run: npm run build
 
+      - name: Disable Jekyll
+        run: touch ./pcf-validator/dist/.nojekyll
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
