@@ -1016,14 +1016,14 @@ function runSmartFix(dataTable, config, log) {
 
       const v1 = vec.sub(p1b, p1a);
       const v2 = vec.sub(p2b, p2a);
-
+      
       const v1CrossV2 = vec.cross(v1, v2);
       if (vec.mag(v1CrossV2) < 0.1) { // Co-linear check
         const d1a2a = vec.dist(p1a, p2a);
         const d1b2b = vec.dist(p1b, p2b);
         const d1a2b = vec.dist(p1a, p2b);
         const d1b2a = vec.dist(p1b, p2a);
-
+        
         // Exact Overlap R-OVR-04
         if (d1a2a < 1.0 && d1b2b < 1.0 || d1a2b < 1.0 && d1b2a < 1.0) {
           log.push({ type: "Fix", ruleId: "R-OVR-04", tier: 1, row: c2._rowIndex, message: `DELETE [R-OVR-04]: Exact duplicate PIPE.` });
@@ -1914,11 +1914,11 @@ const R_BRN_04 = (element, log) => {
   const mainVec = vec.sub(ep2, ep1);
   const mainMag = vec.mag(mainVec);
   if (mainMag === 0) return;
-
+  
   const midPoint = vec.add(ep1, { x: mainVec.x/2, y: mainVec.y/2, z: mainVec.z/2 });
   const brnVec = vec.sub(bp, element.type === "OLET" ? element.cp || midPoint : midPoint);
   const brnMag = vec.mag(brnVec);
-
+  
   if (brnMag > 0) {
     const dot = (mainVec.x * brnVec.x + mainVec.y * brnVec.y + mainVec.z * brnVec.z) / (mainMag * brnMag);
     const angle = Math.acos(Math.max(-1, Math.min(1, dot))) * (180 / Math.PI);
@@ -2569,7 +2569,7 @@ export default function App() {
               </table>
             </div>
 
-
+            
             <div className="bg-[#242830] p-4 rounded border border-gray-700">
               <h2 className="font-bold mb-4 text-[#0077B6]">▼ SMART FIXER SETTINGS</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
