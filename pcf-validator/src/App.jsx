@@ -141,8 +141,10 @@ const fmtCoord = (c) => fmtCoordStr(c, 4);
 
 // Region B: Connectivity Graph Builder
 function buildConnectivityGraph(dataTable, config) {
+  const chains = [];
   const tolerance = config.smartFixer?.connectionTolerance ?? 25.0;
   const gridSnap = config.smartFixer?.gridSnapResolution ?? 1.0;
+  const strategy = config.smartFixer?.strategy || "sequential";
 
   const snap = (coord) => ({
     x: Math.round(coord.x / gridSnap) * gridSnap,
@@ -444,6 +446,16 @@ function analyzeGap(gapVector, context, current, next, config, log) {
   const warnSnap = cfg.warnSnapThreshold ?? 10.0;
 
   const gapMag = vec.mag(gapVector);
+
+  // Check multi-axis R-GAP-06
+  const activeAxes = (Math.abs(gapVector.x) > 1 ? 1 : 0) + (Math.abs(gapVector.y) > 1 ? 1 : 0) + (Math.abs(gapVector.z) > 1 ? 1 : 0);
+  if (activeAxes >= 2 && gapMag > autoFillMax) {
+      log.push({ type: "Error", ruleId: "R-GAP-06", tier: 4, row: next.element._rowIndex, message: `ERROR [R-GAP-06]: Multi-axis gap (X=${gapVector.x.toFixed(1)}mm, Y=${gapVector.y.toFixed(1)}mm, Z=${gapVector.z.toFixed(1)}mm). Cannot auto-fill. Rigorous manual review required.` });
+      return;
+  }
+  if (Math.abs(gapVector.z) > reviewMax) {
+      log.push({ type: "Error", ruleId: "R-CHN-06", tier: 4, row: next.element._rowIndex, message: `ERROR [R-CHN-06]: Z offset ${Math.abs(gapVector.z).toFixed(1)}mm. Too large to snap.` });
+  }
 
   if (gapMag < negligible) {
     if (gapMag > 0.1) {
@@ -978,6 +990,49 @@ function buildTrimDescription(overlapAmt, direction, current, next, target) {
 // Region I: Smart Fix Orchestrator
 function runSmartFix(dataTable, config, log) {
   log.push({ type: "Info", message: "═══ SMART FIX: Starting chain walker ═══" });
+
+  for (let element of dataTable) {
+    if (!element.type || element.type === "MESSAGE-SQUARE" || element.type === "PIPELINE-REFERENCE" || element.type.startsWith("UNITS")) continue;
+
+    R_GEO_05(element, log);
+    R_GEO_08(element, log);
+    R_BRN_04(element, log);
+    R_DAT_06(element, log);
+  }
+
+  // Overlaps R-OVR
+  const pipeComponents = dataTable.filter(c => c.type === "PIPE");
+  for (let i = 0; i < pipeComponents.length; i++) {
+    const c1 = pipeComponents[i];
+    if (c1._proposedFix?.type === "DELETE") continue;
+    const p1a = c1.ep1, p1b = c1.ep2;
+    if (!p1a || !p1b) continue;
+
+    for (let j = i + 1; j < pipeComponents.length; j++) {
+      const c2 = pipeComponents[j];
+      if (c2._proposedFix?.type === "DELETE") continue;
+      const p2a = c2.ep1, p2b = c2.ep2;
+      if (!p2a || !p2b) continue;
+
+      const v1 = vec.sub(p1b, p1a);
+      const v2 = vec.sub(p2b, p2a);
+
+      const v1CrossV2 = vec.cross(v1, v2);
+      if (vec.mag(v1CrossV2) < 0.1) { // Co-linear check
+        const d1a2a = vec.dist(p1a, p2a);
+        const d1b2b = vec.dist(p1b, p2b);
+        const d1a2b = vec.dist(p1a, p2b);
+        const d1b2a = vec.dist(p1b, p2a);
+
+        // Exact Overlap R-OVR-04
+        if (d1a2a < 1.0 && d1b2b < 1.0 || d1a2b < 1.0 && d1b2a < 1.0) {
+          log.push({ type: "Fix", ruleId: "R-OVR-04", tier: 1, row: c2._rowIndex, message: `DELETE [R-OVR-04]: Exact duplicate PIPE.` });
+          c2._proposedFix = { type: "DELETE", ruleId: "R-OVR-04", tier: 1 };
+        }
+      }
+    }
+  }
+
 
   log.push({ type: "Info", message: "Step 4A: Building connectivity graph..." });
   const graph = buildConnectivityGraph(dataTable, config);
@@ -1825,6 +1880,67 @@ function reducer(state, action) {
   }
 }
 
+
+// ----------------------------------------------------------------------------
+// 6.5. NEW RULES
+const R_GEO_05 = (element, log) => {
+  if (element.type !== "BEND") return;
+  const p1 = element.ep1, p2 = element.ep2, c = element.cp;
+  if (!p1 || !p2 || !c) return;
+  const r1 = vec.mag(vec.sub(p1, c));
+  const bore = element.bore || 0;
+  if (bore > 0) {
+    const ratio = r1 / bore;
+    if (Math.abs(ratio - 1.5) > 0.1 && Math.abs(ratio - 1.0) > 0.1) {
+      log.push({ type: "Warning", ruleId: "R-GEO-05", tier: 3, row: element._rowIndex, message: `WARNING [R-GEO-05]: BEND radius ${Number(r1).toFixed(1)}mm does not match standard 1.5D or 1.0D.` });
+    }
+  }
+};
+
+const R_GEO_08 = (element, log) => {
+  if (!element.type?.startsWith("REDUCER")) return;
+  const r1 = (element.bores && element.bores[0]) ? element.bores[0] : element.bore;
+  const r2 = (element.bores && element.bores[1]) ? element.bores[1] : element.bore;
+  if (r1 === r2) {
+    log.push({ type: "Error", ruleId: "R-GEO-08", tier: 4, row: element._rowIndex, message: `ERROR [R-GEO-08]: REDUCER has identical Entry/Exit bores (${r1}mm).` });
+  }
+};
+
+const R_BRN_04 = (element, log) => {
+  if (element.type !== "OLET" && element.type !== "TEE") return;
+  const bp = element.bp;
+  const ep1 = element.ep1, ep2 = element.ep2;
+  if (!bp || !ep1 || !ep2) return;
+  const mainVec = vec.sub(ep2, ep1);
+  const mainMag = vec.mag(mainVec);
+  if (mainMag === 0) return;
+
+  const midPoint = vec.add(ep1, { x: mainVec.x/2, y: mainVec.y/2, z: mainVec.z/2 });
+  const brnVec = vec.sub(bp, element.type === "OLET" ? element.cp || midPoint : midPoint);
+  const brnMag = vec.mag(brnVec);
+
+  if (brnMag > 0) {
+    const dot = (mainVec.x * brnVec.x + mainVec.y * brnVec.y + mainVec.z * brnVec.z) / (mainMag * brnMag);
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot))) * (180 / Math.PI);
+    if (Math.abs(angle - 90) > 2 && Math.abs(angle - 45) > 2 && Math.abs(angle - 135) > 2) {
+      log.push({ type: "Error", ruleId: "R-BRN-04", tier: 4, row: element._rowIndex, message: `ERROR [R-BRN-04]: Branch ${angle.toFixed(1)}° from perpendicular.` });
+    }
+  }
+};
+
+const R_DAT_06 = (element, log) => {
+  if (!element.skey) return;
+  const skey = element.skey.toUpperCase();
+  const type = element.type || "";
+  if (type === "OLET" && !skey.startsWith("OL")) {
+    log.push({ type: "Warning", ruleId: "R-DAT-06", tier: 3, row: element._rowIndex, message: `WARNING [R-DAT-06]: SKEY '${skey}' prefix mismatch for OLET (expected 'OL...').` });
+  }
+  if (type === "BEND" && !skey.startsWith("BE")) {
+    log.push({ type: "Warning", ruleId: "R-DAT-06", tier: 3, row: element._rowIndex, message: `WARNING [R-DAT-06]: SKEY '${skey}' prefix mismatch for BEND (expected 'BE...').` });
+  }
+};
+
+
 // ----------------------------------------------------------------------------
 // 7. UI COMPONENTS
 // ----------------------------------------------------------------------------
@@ -2451,6 +2567,20 @@ export default function App() {
                     ))}
                  </tbody>
               </table>
+            </div>
+
+
+            <div className="bg-[#242830] p-4 rounded border border-gray-700">
+              <h2 className="font-bold mb-4 text-[#0077B6]">▼ SMART FIXER SETTINGS</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                 <label className="flex flex-col text-sm text-gray-300">
+                    Chaining Strategy
+                    <select className="bg-[#111317] border border-gray-600 rounded p-1 mt-1 text-white" value={config.smartFixer?.strategy || 'sequential'} onChange={e => dispatch({type:'UPDATE_CONFIG', payload:{smartFixer: {...(config.smartFixer||{}), strategy: e.target.value}}})}>
+                       <option value="sequential">Strict Sequential</option>
+                       <option value="spatial">Spatial Topology</option>
+                    </select>
+                 </label>
+              </div>
             </div>
 
             <div className="bg-[#242830] p-4 rounded border border-gray-700">
