@@ -873,10 +873,26 @@ function applyFixesEngine(dataTable, chains, config, log) {
 
   updatedTable.forEach((row, i) => { row._rowIndex = i + 1; });
   updatedTable.forEach(row => {
-    row.fixingAction = null;
-    row.fixingActionTier = null;
-    row.fixingActionRuleId = null;
+    // Reset preview flags
+    row._proposedFix = null;
   });
+
+  // Ensure all independent fixes outside chains are applied too
+  dataTable.forEach(row => {
+      if (row._proposedFix?.type === "DELETE" && row._proposedFix.tier <= 2 && !deleteRows.has(row._rowIndex)) {
+          deleteRows.add(row._rowIndex);
+          applied.push({ ruleId: row._proposedFix.ruleId, row: row._rowIndex, action: "DELETE" });
+          log.push({ type: "Applied", ruleId: row._proposedFix.ruleId, row: row._rowIndex, message: `APPLIED: Deleted ${row.type} at Row ${row._rowIndex}.` });
+      }
+      if (row._proposedFix?.type === "SNAP_AXIS" && row._proposedFix.tier <= 2) {
+          snapToSingleAxis(row, row._proposedFix.dominantAxis);
+          markModified(row, "ep1", "SmartFix:R-GEO-03");
+          markModified(row, "ep2", "SmartFix:R-GEO-03");
+          applied.push({ ruleId: "R-GEO-03", row: row._rowIndex, action: "SNAP_AXIS" });
+      }
+  });
+
+  updatedTable = updatedTable.filter(row => !deleteRows.has(row._rowIndex));
 
   return { updatedTable, applied, deleteCount: deleteRows.size, insertCount: newRows.length };
 }
@@ -1896,6 +1912,7 @@ const initialState = {
   status: "Ready",
   previewModalData: null, // { file, rows, mappings, rawHeaders }
   logFilter: "All",
+  fixesApplied: false, // Track if fixes were applied to enable export
   smartFix: {
     status: "idle",
     graph: null,
@@ -1920,7 +1937,8 @@ function reducer(state, action) {
         dataTable: action.payload.components,
         importMode: "pcf",
         status: `Parsed ${action.payload.components.length} components.`,
-        log: [], validationResults: [], finalPcf: ""
+        log: [], validationResults: [], finalPcf: "",
+        fixesApplied: false
       };
     case 'OPEN_EXCEL_PREVIEW':
       return { ...state, previewModalData: action.payload, status: "Previewing Excel/CSV data..." };
@@ -1944,7 +1962,8 @@ function reducer(state, action) {
         validationResults: action.payload.validationResults,
         finalPcf: action.payload.finalPcf,
         tally: action.payload.tally,
-        status: action.payload.status
+        status: action.payload.status,
+        fixesApplied: action.payload.fixesApplied !== undefined ? action.payload.fixesApplied : state.fixesApplied
       };
     case 'UPDATE_CONFIG':
       return { ...state, config: { ...state.config, ...action.payload } };
@@ -2264,7 +2283,8 @@ export default function App() {
         validationResults: vResults,
         finalPcf: generated,
         tally: newTally,
-        status: `Fixes Applied! ${result.applied.length} fixes executed. Validation: ${vResults.filter(r=>r.severity==='ERROR').length} errors.`
+        status: `Fixes Applied! ${result.applied.length} fixes executed. Validation: ${vResults.filter(r=>r.severity==='ERROR').length} errors.`,
+        fixesApplied: true
       }
     });
   };
@@ -2283,17 +2303,20 @@ export default function App() {
       ]);
 
       // Highlight modified cells
-      Object.keys(r._modified).forEach(field => {
-        let colIdx = cols.indexOf(field.toUpperCase());
-        if (colIdx >= 0) {
-           const cell = row.getCell(colIdx + 1);
-           const tag = r._modified[field];
-           if (tag === "Error") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5C6CB' } };
-           else if (tag === "Calculated") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1ECF1' } };
-           else if (tag === "Mock") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8D7DA' } };
-           else cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3CD' } }; // Amber fallback
-        }
-      });
+      if (r._modified) {
+        Object.keys(r._modified).forEach(field => {
+          let colIdx = cols.indexOf(field.toUpperCase());
+          if (colIdx >= 0) {
+             const cell = row.getCell(colIdx + 1);
+             const tag = r._modified[field];
+             if (tag && tag.startsWith("SmartFix:")) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4F8C8' } };
+             else if (tag === "Error") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5C6CB' } };
+             else if (tag === "Calculated") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1ECF1' } };
+             else if (tag === "Mock") cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8D7DA' } };
+             else cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3CD' } }; // Amber fallback
+          }
+        });
+      }
     });
 
     const buffer = await workbook.xlsx.writeBuffer();
@@ -2492,6 +2515,7 @@ export default function App() {
                    {dataTable.map((r, i) => {
                      const getBg = (field) => {
                        const tag = r._modified[field];
+                       if (tag && tag.startsWith('SmartFix:')) return 'bg-[#B4F8C8] text-[#006400] font-bold'; // Distinct green for auto-fixes
                        if (tag === 'Error') return 'bg-[#F5C6CB] text-[#721C24] font-bold';
                        if (tag === 'Calculated') return 'bg-[#D1ECF1] text-[#0C5460]';
                        if (tag === 'Mock') return 'bg-[#F8D7DA] text-[#721C24]';
@@ -2719,7 +2743,7 @@ export default function App() {
           <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
              <div className="bg-[#111317] border border-gray-700 p-2 rounded flex items-center gap-2">
                <span className="text-gray-400 font-bold mr-2">FILTER:</span>
-               {["All", "Error", "Warning", "Calculated", "Mock", "Info"].map(f => (
+               {["All", "Error", "Warning", "Calculated", "Mock", "Info", "Fix", "Applied"].map(f => (
                   <label key={f} className="flex items-center gap-1 cursor-pointer hover:text-white">
                     <input type="radio" name="logfilter" checked={logFilter === f} onChange={() => dispatch({type: 'SET_LOG_FILTER', payload: f})} className="text-[#0077B6] bg-gray-800" />
                     {f}
@@ -2767,13 +2791,15 @@ export default function App() {
                   <tbody>
                     {log.filter(l => logFilter === "All" || l.type === logFilter).map((l, i) => (
                       <tr key={i} className="border-b border-gray-800 hover:bg-[#2A2E37]">
-                        <td className="p-2 w-16 text-center text-gray-500">Row {l.row}</td>
+                        <td className="p-2 w-16 text-center text-gray-500">{l.row ? `Row ${l.row}` : '-'}</td>
                         <td className="p-2 w-24">
                           <span className={`px-2 py-0.5 rounded text-xs text-white ${
                             l.type === 'Error' ? 'bg-[#DC3545]' :
                             l.type === 'Warning' ? 'bg-[#FD7E14]' :
                             l.type === 'Calculated' ? 'bg-[#0D6EFD]' :
-                            l.type === 'Mock' ? 'bg-[#E91E63]' : 'bg-[#6C757D]'
+                            l.type === 'Mock' ? 'bg-[#E91E63]' :
+                            l.type === 'Applied' ? 'bg-[#28A745]' :
+                            l.type === 'Fix' ? 'bg-[#20C997]' : 'bg-[#6C757D]'
                           }`}>{l.type}</span>
                         </td>
                         <td className="p-2 text-gray-300 font-mono text-xs">{l.message}</td>
@@ -2855,10 +2881,10 @@ export default function App() {
       <div className="flex items-center justify-between px-4 py-2 bg-[#111317] border-t border-gray-800 text-xs">
         <div className="text-gray-400">{status}</div>
         <div className="flex items-center gap-3">
-          <button onClick={exportExcel} disabled={dataTable.length === 0} className="disabled:opacity-50 text-gray-300 hover:text-white flex items-center gap-1 transition-colors">
+          <button onClick={exportExcel} disabled={dataTable.length === 0 || !state.fixesApplied} className="disabled:opacity-50 text-gray-300 hover:text-white flex items-center gap-1 transition-colors">
             <Download className="w-4 h-4" /> Export Data Table
           </button>
-          <button onClick={exportPcf} disabled={!finalPcf} className="disabled:opacity-50 text-gray-300 hover:text-white flex items-center gap-1 transition-colors">
+          <button onClick={exportPcf} disabled={!finalPcf || !state.fixesApplied} className="disabled:opacity-50 text-gray-300 hover:text-white flex items-center gap-1 transition-colors">
             <Download className="w-4 h-4" /> Export PCF
           </button>
           <button onClick={runBasicFixer} disabled={dataTable.length === 0} className="disabled:opacity-50 text-gray-300 hover:text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors">
