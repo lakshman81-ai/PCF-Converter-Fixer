@@ -139,6 +139,94 @@ const fmtCoord = (c) => fmtCoordStr(c, 4);
 // SMART FIXER — CHAIN WALKER ENGINE
 // ----------------------------------------------------------------------------
 
+// Region PTE: Point-to-Element Pre-Processing Engine
+function runPteEngine(dataTable, config, log) {
+  const lineKeyCol = config.smartFixer?.lineKeyCol;
+
+  let currentLineKey = null;
+  let sequenceGroup = 0;
+
+  for (let i = 0; i < dataTable.length; i++) {
+      const row = dataTable[i];
+      if (!row.type) continue;
+
+      let rowLineKey = null;
+      if (lineKeyCol) {
+          if (lineKeyCol === "PIPELINE-REFERENCE") rowLineKey = row.ca[97] || row.text;
+          else if (row[lineKeyCol]) rowLineKey = row[lineKeyCol];
+      }
+
+      if (!rowLineKey || rowLineKey.trim() === "") {
+           row._pteMode = "B(b)";
+           row._lineKey = `Group_${sequenceGroup}`;
+      } else {
+           row._pteMode = "B(a)";
+           row._lineKey = rowLineKey;
+      }
+
+      if (rowLineKey && rowLineKey !== currentLineKey) {
+           sequenceGroup++;
+           currentLineKey = rowLineKey;
+      }
+  }
+
+  if (lineKeyCol) {
+      log.push({ type: "Info", message: `PTE Engine tracked ${sequenceGroup} Line_Key boundaries using column '${lineKeyCol}'.` });
+  }
+}
+
+function runOrphanSweep(orphans, components, config, log) {
+  log.push({ type: "Info", message: `Running PTE Orphan Sweep (Case D) on ${orphans.length} elements...` });
+  const sweptConnections = [];
+
+  const minRMult = config.smartFixer?.orphanSweepMinMult ?? 0.2;
+  const maxRConst = config.smartFixer?.orphanSweepMaxRadius ?? 13000.0;
+  const minRatio = config.smartFixer?.boreRatioMin ?? 0.7;
+  const maxRatio = config.smartFixer?.boreRatioMax ?? 1.5;
+
+  for (const orphan of orphans) {
+      if (!orphan.ep1 && !orphan.ep2) continue;
+      const oPts = [orphan.ep1, orphan.ep2].filter(Boolean);
+
+      const nb = orphan.bore || 50;
+      const minR = minRMult * nb;
+      const maxR = maxRConst;
+
+      let bestNeighbor = null;
+      let bestScore = Infinity;
+
+      for (const candidate of components) {
+          if (candidate._rowIndex === orphan._rowIndex) continue;
+          if (orphan._pteMode === "B(a)" && candidate._pteMode === "B(a)" && orphan._lineKey !== candidate._lineKey) continue;
+
+          const cBore = candidate.bore || 50;
+          const ratio = nb / cBore;
+          if (ratio < minRatio || ratio > maxRatio) continue;
+
+          const cPts = [candidate.ep1, candidate.ep2, candidate.cp, candidate.bp].filter(Boolean);
+
+          for (const op of oPts) {
+              for (const cp of cPts) {
+                  const d = vec.dist(op, cp);
+                  if (d >= minR && d <= maxR) {
+                      if (d < bestScore) {
+                          bestScore = d;
+                          bestNeighbor = candidate;
+                      }
+                  }
+              }
+          }
+      }
+      if (bestNeighbor) {
+          sweptConnections.push({ orphan: orphan._rowIndex, neighbor: bestNeighbor._rowIndex, distance: bestScore });
+      }
+  }
+  if (sweptConnections.length > 0) {
+      log.push({ type: "Info", message: `Orphan Sweep logically matched ${sweptConnections.length} elements across disjoints.` });
+  }
+  return sweptConnections;
+}
+
 // Region B: Connectivity Graph Builder
 function buildConnectivityGraph(dataTable, config) {
   const chains = [];
@@ -484,13 +572,33 @@ function analyzeGap(gapVector, context, current, next, config, log) {
   const silentSnap = cfg.silentSnapThreshold ?? 2.0;
   const warnSnap = cfg.warnSnapThreshold ?? 10.0;
 
+  // PASS 1 CONSTRAINT: Only manipulate PIPEs if MultiPassMode is ON and we are in Pass 1.
+  const isPassTwo = cfg.isPassTwo;
+  const multiPass = cfg.autoMultiPassMode;
+  if (multiPass && !isPassTwo) {
+      // In Pass 1, we strictly only alter PIPEs (stretch/shorten).
+      // If neither is a PIPE, or if we would need to create a new fitting, we skip it for Pass 2.
+      if (current.type !== "PIPE" && next.element.type !== "PIPE") {
+          return null; // Leave it for Pass 2 (Fittings)
+      }
+  }
+
   const gapMag = vec.mag(gapVector);
+
+  // Auto Approval / Auto Rejection overrides based on config
+  const continuityTol = cfg.continuityTolerance ?? 25.0;
+  const maxSegLen = cfg.maxSegmentLength ?? 20000.0;
+
+  if (gapMag > maxSegLen) {
+      log.push({ type: "Error", ruleId: "R-GAP-MAX", tier: 4, row: next.element._rowIndex, message: `ERROR [R-GAP-MAX]: Gap of ${Number(gapMag).toFixed(1)}mm exceeds maximum auto-reject segment length of ${maxSegLen}mm.` });
+      return null;
+  }
 
   // Check multi-axis R-GAP-06
   const activeAxes = (Math.abs(gapVector.x) > 1 ? 1 : 0) + (Math.abs(gapVector.y) > 1 ? 1 : 0) + (Math.abs(gapVector.z) > 1 ? 1 : 0);
   if (activeAxes >= 2 && gapMag > autoFillMax) {
       log.push({ type: "Error", ruleId: "R-GAP-06", tier: 4, row: next.element._rowIndex, message: `ERROR [R-GAP-06]: Multi-axis gap (X=${gapVector.x.toFixed(1)}mm, Y=${gapVector.y.toFixed(1)}mm, Z=${gapVector.z.toFixed(1)}mm). Cannot auto-fill. Rigorous manual review required.` });
-      return;
+      return null;
   }
   if (Math.abs(gapVector.z) > reviewMax) {
       log.push({ type: "Error", ruleId: "R-CHN-06", tier: 4, row: next.element._rowIndex, message: `ERROR [R-CHN-06]: Z offset ${Math.abs(gapVector.z).toFixed(1)}mm. Too large to snap.` });
@@ -498,7 +606,9 @@ function analyzeGap(gapVector, context, current, next, config, log) {
 
   if (gapMag < negligible) {
     if (gapMag > 0.01) {
-      return { type: "SNAP", ruleId: "R-GAP-01", tier: 1, description: `SNAP [R-GAP-01]: Close ${Number(gapMag).toFixed(2)}mm micro-gap by snapping endpoints.`, gapVector, current, next };
+      // Auto Approval Logic: gap < continuity tolerance (default 25mm)
+      const tier = gapMag < continuityTol ? 1 : 3;
+      return { type: "SNAP", ruleId: "R-GAP-01", tier: tier, description: `SNAP [R-GAP-01]: Close ${Number(gapMag).toFixed(2)}mm micro-gap by snapping endpoints.`, gapVector, current, next };
     }
     return null;
   }
@@ -518,8 +628,12 @@ function analyzeGap(gapVector, context, current, next, config, log) {
   if (axes.length === 1 && axes[0].axis === context.travelAxis) {
     const gapAmt = Math.abs(alongDelta);
     const dir = directionLabel(context.travelAxis, context.travelDirection);
+
+    // Apply Auto Approval Constraints
+    const tier = gapAmt < continuityTol ? 2 : 3;
+
     if (gapAmt <= autoFillMax) {
-      return { type: "INSERT", ruleId: "R-GAP-02", tier: 2, description: buildInsertDescription(gapAmt, dir, context, current), gapAmount: gapAmt, fillAxis: context.travelAxis, fillDir: context.travelDirection, current, next };
+      return { type: "INSERT", ruleId: "R-GAP-02", tier: tier, description: buildInsertDescription(gapAmt, dir, context, current), gapAmount: gapAmt, fillAxis: context.travelAxis, fillDir: context.travelDirection, current, next };
     }
     if (gapAmt <= reviewMax) {
       return { type: "REVIEW", ruleId: "R-GAP-03", tier: 3, description: `REVIEW [R-GAP-03]: ${Number(gapAmt).toFixed(1)}mm gap along ${dir}. Exceeds ${autoFillMax}mm auto-fill threshold. Manual review.`, current, next };
@@ -593,6 +707,12 @@ function runElementRules(element, context, prevElement, elemAxis, elemDir, confi
     if (len < (cfg.microPipeThreshold ?? 6.0) && len > 0) {
       log.push({ type: "Fix", ruleId: "R-GEO-01", tier: 1, row: ri, message: `DELETE [R-GEO-01]: Micro-pipe ${Number(len).toFixed(1)}mm < ${cfg.microPipeThreshold ?? 6}mm threshold.` });
       element._proposedFix = { type: "DELETE", ruleId: "R-GEO-01", tier: 1 };
+    }
+
+    // Auto Approval constraints for max pipe segment lengths
+    const maxSegLen = cfg.maxSegmentLength ?? 20000.0;
+    if (len > maxSegLen) {
+        log.push({ type: "Error", ruleId: "R-GEO-MAX", tier: 4, row: ri, message: `ERROR [R-GEO-MAX]: Pipe segment ${Number(len).toFixed(1)}mm exceeds maximum allowed segment length of ${maxSegLen}mm.` });
     }
   }
 
@@ -795,6 +915,7 @@ function applyFixesEngine(dataTable, chains, config, log) {
   for (const chain of chains) {
     for (const link of chain) {
       const elem = link.element;
+      if (elem.fixingActionRejected) continue; // Skip rejected fixes
       if (elem._proposedFix?.type === "DELETE" && elem._proposedFix.tier <= 2) {
         deleteRows.add(elem._rowIndex);
         applied.push({ ruleId: elem._proposedFix.ruleId, row: elem._rowIndex, action: "DELETE" });
@@ -806,6 +927,7 @@ function applyFixesEngine(dataTable, chains, config, log) {
   for (const chain of chains) {
     for (const link of chain) {
       const elem = link.element;
+      if (elem.fixingActionRejected) continue; // Skip rejected fixes
       if (elem._proposedFix?.type === "SNAP_AXIS" && elem._proposedFix.tier <= 2) {
         const axis = elem._proposedFix.dominantAxis;
         snapToSingleAxis(elem, axis);
@@ -819,6 +941,7 @@ function applyFixesEngine(dataTable, chains, config, log) {
   for (const chain of chains) {
     for (const link of chain) {
       if (!link.fixAction) continue;
+      if (link.element.fixingActionRejected) continue; // Skip rejected fixes
       if (link.fixAction.type === "SNAP" && link.fixAction.tier <= 2) {
         snapEndpoints(link.element, link.nextElement);
         markModified(link.element, "ep2", `SmartFix:${link.fixAction.ruleId}`);
@@ -831,6 +954,7 @@ function applyFixesEngine(dataTable, chains, config, log) {
   for (const chain of chains) {
     for (const link of chain) {
       if (!link.fixAction) continue;
+      if (link.element.fixingActionRejected) continue; // Skip rejected fixes
       if (link.fixAction.type === "TRIM" && link.fixAction.tier <= 2) {
         const target = link.fixAction.trimTarget === "current" ? link.element : link.nextElement;
         if ((target.type || "").toUpperCase() === "PIPE") {
@@ -852,6 +976,7 @@ function applyFixesEngine(dataTable, chains, config, log) {
   for (const chain of chains) {
     for (const link of chain) {
       if (!link.fixAction) continue;
+      if (link.element.fixingActionRejected) continue; // Skip rejected fixes
       if (link.fixAction.type === "INSERT" && link.fixAction.tier <= 2) {
         const fillerPipe = createFillerPipe(link, config);
         newRows.push({ insertAfterRow: link.element._rowIndex, pipe: fillerPipe });
@@ -861,24 +986,9 @@ function applyFixesEngine(dataTable, chains, config, log) {
     }
   }
 
-  let updatedTable = dataTable.filter(row => !deleteRows.has(row._rowIndex));
-  for (const insertion of newRows.sort((a, b) => b.insertAfterRow - a.insertAfterRow)) {
-    const idx = updatedTable.findIndex(r => r._rowIndex === insertion.insertAfterRow);
-    if (idx >= 0) {
-      updatedTable.splice(idx + 1, 0, insertion.pipe);
-    } else {
-      updatedTable.push(insertion.pipe);
-    }
-  }
-
-  updatedTable.forEach((row, i) => { row._rowIndex = i + 1; });
-  updatedTable.forEach(row => {
-    // Reset preview flags
-    row._proposedFix = null;
-  });
-
   // Ensure all independent fixes outside chains are applied too
   dataTable.forEach(row => {
+      if (row.fixingActionRejected) return; // Skip rejected fixes
       if (row._proposedFix?.type === "DELETE" && row._proposedFix.tier <= 2 && !deleteRows.has(row._rowIndex)) {
           deleteRows.add(row._rowIndex);
           applied.push({ ruleId: row._proposedFix.ruleId, row: row._rowIndex, action: "DELETE" });
@@ -892,7 +1002,23 @@ function applyFixesEngine(dataTable, chains, config, log) {
       }
   });
 
-  updatedTable = updatedTable.filter(row => !deleteRows.has(row._rowIndex));
+  let updatedTable = dataTable.filter(row => !deleteRows.has(row._rowIndex));
+
+  for (const insertion of newRows.sort((a, b) => b.insertAfterRow - a.insertAfterRow)) {
+    const idx = updatedTable.findIndex(r => r._rowIndex === insertion.insertAfterRow);
+    if (idx >= 0) {
+      updatedTable.splice(idx + 1, 0, insertion.pipe);
+    } else {
+      updatedTable.push(insertion.pipe);
+    }
+  }
+
+  updatedTable.forEach((row, i) => { row._rowIndex = i + 1; });
+  updatedTable.forEach(row => {
+    // Reset preview flags
+    row._proposedFix = null;
+    row.fixingActionRejected = false;
+  });
 
   return { updatedTable, applied, deleteCount: deleteRows.size, insertCount: newRows.length };
 }
@@ -1016,9 +1142,10 @@ function formatProposedFix(fix, element) {
   const ri = element._rowIndex;
 
   switch (fix.type) {
-    case "DELETE":
+    case "DELETE": {
       const len = element.ep1 && element.ep2 ? vec.mag(vec.sub(element.ep2, element.ep1)) : 0;
       return `DELETE [${fix.ruleId}]: Remove ${type} at Row ${ri}\n  Length: ${Number(len).toFixed(1)}mm, Bore: ${element.bore || 0}mm\n  Reason: ${fix.ruleId === "R-GEO-01" ? "Micro-element below threshold" : "Fold-back element"}`;
+    }
     case "SNAP_AXIS":
       return `SNAP [${fix.ruleId}]: Align ${type} to pure ${fix.dominantAxis}-axis\n  Row ${ri}: Off-axis components will be zeroed\n  EP2 non-${fix.dominantAxis} coords → match EP1`;
     default:
@@ -1044,7 +1171,12 @@ function buildTrimDescription(overlapAmt, direction, current, next, target) {
 
 // Region I: Smart Fix Orchestrator
 function runSmartFix(dataTable, config, log) {
-  log.push({ type: "Info", message: "═══ SMART FIX: Starting chain walker ═══" });
+  const isPassTwo = config.smartFixer?.isPassTwo;
+  log.push({ type: "Info", message: `═══ SMART FIX: Starting chain walker (PASS ${isPassTwo ? "2" : "1"}) ═══` });
+
+  if (config.smartFixer?.autoMultiPassMode) {
+      runPteEngine(dataTable, config, log);
+  }
 
   for (let element of dataTable) {
     if (!element.type || element.type === "MESSAGE-SQUARE" || element.type === "PIPELINE-REFERENCE" || element.type.startsWith("UNITS")) continue;
@@ -1103,6 +1235,12 @@ function runSmartFix(dataTable, config, log) {
 
   log.push({ type: "Info", message: "Step 4B: Walking element chains..." });
   const { chains, orphans } = walkAllChains(graph, config, log);
+
+  if (config.smartFixer?.autoMultiPassMode && !isPassTwo) {
+      const sweepResults = runOrphanSweep(orphans, graph.components, config, log);
+      // Swept connections could be used to join chains or create gap analysis triggers.
+      // For now, we will simply log the connections. True integration might inject these as new edges in the graph.
+  }
 
   // Recursively count total elements walked across all branch chains
   function countElementsInChains(chainsToCount) {
@@ -1913,6 +2051,7 @@ const initialState = {
   previewModalData: null, // { file, rows, mappings, rawHeaders }
   logFilter: "All",
   fixesApplied: false, // Track if fixes were applied to enable export
+  isPassTwoEnabled: false, // Track if Pass 1 is complete to allow Pass 2
   smartFix: {
     status: "idle",
     graph: null,
@@ -1938,7 +2077,8 @@ function reducer(state, action) {
         importMode: "pcf",
         status: `Parsed ${action.payload.components.length} components.`,
         log: [], validationResults: [], finalPcf: "",
-        fixesApplied: false
+        fixesApplied: false,
+        isPassTwoEnabled: false
       };
     case 'OPEN_EXCEL_PREVIEW':
       return { ...state, previewModalData: action.payload, status: "Previewing Excel/CSV data..." };
@@ -1963,7 +2103,8 @@ function reducer(state, action) {
         finalPcf: action.payload.finalPcf,
         tally: action.payload.tally,
         status: action.payload.status,
-        fixesApplied: action.payload.fixesApplied !== undefined ? action.payload.fixesApplied : state.fixesApplied
+        fixesApplied: action.payload.fixesApplied !== undefined ? action.payload.fixesApplied : state.fixesApplied,
+        isPassTwoEnabled: action.payload.isPassTwoEnabled !== undefined ? action.payload.isPassTwoEnabled : state.isPassTwoEnabled
       };
     case 'UPDATE_CONFIG':
       return { ...state, config: { ...state.config, ...action.payload } };
@@ -1998,6 +2139,20 @@ function reducer(state, action) {
             totalApplied: action.payload.applied.length
           }
         }
+      };
+    case 'TOGGLE_FIX_APPROVAL':
+      return {
+        ...state,
+        dataTable: state.dataTable.map(row =>
+          row._rowIndex === action.payload
+            ? { ...row, fixingActionRejected: !row.fixingActionRejected }
+            : row
+        )
+      };
+    case 'AUTO_APPROVE_ALL':
+      return {
+        ...state,
+        dataTable: state.dataTable.map(row => ({ ...row, fixingActionRejected: false }))
       };
     default: return state;
   }
@@ -2251,6 +2406,16 @@ export default function App() {
     const tableCopy = JSON.parse(JSON.stringify(dataTable));
     const runLog = [...log];
 
+    // the chains structure currently references old table objects, we need to map the rejected state from the tableCopy
+    for (const chain of state.smartFix.chains) {
+        for (const link of chain) {
+            const tableRow = tableCopy.find(r => r._rowIndex === link.element._rowIndex);
+            if (tableRow) {
+                link.element.fixingActionRejected = tableRow.fixingActionRejected;
+            }
+        }
+    }
+
     const result = applyFixesEngine(tableCopy, state.smartFix.chains, config, runLog);
 
     // Rerun post steps and validations since we modified the table
@@ -2274,6 +2439,8 @@ export default function App() {
       }
     });
 
+    const isPassTwoCurrently = config.smartFixer?.isPassTwo;
+
     // Also update the core state from the run
     dispatch({
       type: 'RUN_FIXER',
@@ -2284,7 +2451,40 @@ export default function App() {
         finalPcf: generated,
         tally: newTally,
         status: `Fixes Applied! ${result.applied.length} fixes executed. Validation: ${vResults.filter(r=>r.severity==='ERROR').length} errors.`,
-        fixesApplied: true
+        fixesApplied: isPassTwoCurrently || !config.smartFixer?.autoMultiPassMode, // Only unlock exports after pass 2 or if single-pass
+        isPassTwoEnabled: !isPassTwoCurrently // Enable second pass after applying first pass (disable after second pass)
+      }
+    });
+  };
+
+  useEffect(() => {
+    // Force a recalculation of the basic validator if Line_Key column changes and we have data
+    if (dataTable.length > 0 && activeTab === 'config') {
+       runBasicFixer();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.smartFixer?.lineKeyCol]);
+
+  const handleRunSecondPass = () => {
+    dispatch({ type: 'SET_SMART_FIX_STATUS', payload: 'running' });
+    const tableCopy = JSON.parse(JSON.stringify(dataTable));
+    const runLog = [...log];
+
+    // We will inject the pass 2 flag into the config so the engine knows
+    const pass2Config = { ...config, smartFixer: { ...config.smartFixer, isPassTwo: true } };
+    dispatch({ type: 'UPDATE_CONFIG', payload: { smartFixer: pass2Config.smartFixer } });
+
+    runPreFixerSteps(tableCopy, pass2Config, runLog);
+    const result = runSmartFix(tableCopy, pass2Config, runLog);
+
+    dispatch({
+      type: 'SMART_FIX_COMPLETE',
+      payload: {
+        graph: result.graph,
+        chains: result.chains,
+        summary: result.summary,
+        dataTable: tableCopy,
+        log: runLog
       }
     });
   };
@@ -2338,9 +2538,18 @@ export default function App() {
   };
 
   const ExcelPreviewModal = () => {
+    const data = previewModalData || { fileName: '', totalCols: 0, totalRows: 0, headerRowIdx: 0, rawHeaders: [], mappings: [], dataRows: [] };
+    const [currentMappings, setCurrentMappings] = useState([...data.mappings]);
+
+    useEffect(() => {
+        if (previewModalData) {
+            setCurrentMappings([...previewModalData.mappings]);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [previewModalData]);
+
     if (!previewModalData) return null;
-    const { fileName, totalCols, totalRows, headerRowIdx, rawHeaders, mappings, dataRows } = previewModalData;
-    const [currentMappings, setCurrentMappings] = useState([...mappings]);
+    const { fileName, totalCols, totalRows, headerRowIdx, rawHeaders, dataRows } = data;
 
     return (
       <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -2524,8 +2733,14 @@ export default function App() {
                      };
                      const getTitle = (field) => r._modified[field] ? `[${r._modified[field]}] modified` : '';
 
-                     const renderFixingAction = (val, tier, ruleId) => {
+                     const renderFixingAction = (row) => {
+                       const val = row.fixingAction;
+                       const tier = row.fixingActionTier;
+                       const ruleId = row.fixingActionRuleId;
+
                        if (!val) return <span className="text-gray-400">—</span>;
+
+                       const isRejected = row.fixingActionRejected;
                        const tierColors = {
                          1: { bg: "#D4EDDA", text: "#155724", border: "#28A745", label: "AUTO" },
                          2: { bg: "#FFF3CD", text: "#856404", border: "#FFC107", label: "FIX" },
@@ -2533,21 +2748,38 @@ export default function App() {
                          4: { bg: "#F8D7DA", text: "#721C24", border: "#DC3545", label: "ERROR" },
                        };
                        const colors = tierColors[tier] || tierColors[3];
+
                        return (
                          <div style={{
-                           background: colors.bg, color: colors.text, borderLeft: `3px solid ${colors.border}`,
+                           background: isRejected ? "#F8F9FA" : colors.bg,
+                           color: isRejected ? "#6C757D" : colors.text,
+                           borderLeft: `3px solid ${isRejected ? "#ADB5BD" : colors.border}`,
                            padding: "4px 8px", fontFamily: "'JetBrains Mono', monospace", fontSize: "0.7rem",
                            lineHeight: 1.4, whiteSpace: "pre-wrap", maxWidth: 320,
+                           opacity: isRejected ? 0.6 : 1,
+                           position: "relative"
                          }}>
+                           <div className="absolute top-1 right-1 flex gap-1 cursor-pointer">
+                              {state.smartFix.status === "previewing" && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); dispatch({type: 'TOGGLE_FIX_APPROVAL', payload: row._rowIndex}); }}
+                                  className={`px-1.5 py-0.5 text-xs rounded shadow-sm font-bold border ${isRejected ? 'bg-green-100 text-green-700 border-green-300 hover:bg-green-200' : 'bg-red-100 text-red-700 border-red-300 hover:bg-red-200'}`}
+                                >
+                                  {isRejected ? "Approve" : "Reject"}
+                                </button>
+                              )}
+                           </div>
                            <span style={{
-                             display: "inline-block", background: colors.border, color: "white", padding: "1px 6px",
+                             display: "inline-block", background: isRejected ? "#ADB5BD" : colors.border, color: "white", padding: "1px 6px",
                              borderRadius: 3, fontSize: "0.6rem", fontWeight: 700, marginBottom: 2,
                            }}>
-                             {colors.label} T{tier}
+                             {isRejected ? "REJECTED" : `${colors.label} T${tier}`}
                            </span>
                            {" "}{ruleId}
                            <br/>
-                           {val}
+                           <span style={{ textDecoration: isRejected ? 'line-through' : 'none' }}>
+                             {val}
+                           </span>
                          </div>
                        );
                      };
@@ -2559,8 +2791,8 @@ export default function App() {
                          <td className={`p-2 border border-gray-300 sticky left-[120px] bg-white z-10 font-mono font-bold ${getBg('type')}`}>{r.type}</td>
                          <td className={`p-2 border border-gray-300 truncate max-w-[200px] ${getBg('text')}`} title={r.text}>{r.text}</td>
 
-                         <td className="p-2 border border-gray-300 bg-blue-50 align-top">
-                           {renderFixingAction(r.fixingAction, r.fixingActionTier, r.fixingActionRuleId)}
+                         <td className="p-2 border border-gray-300 bg-blue-50 align-top min-w-[250px]">
+                           {renderFixingAction(r)}
                          </td>
 
                          <td className={`p-2 border border-gray-300 ${getBg('pipelineRef')}`}>{r.pipelineRef}</td>
@@ -2702,11 +2934,23 @@ export default function App() {
               <h2 className="font-bold mb-4 text-[#0077B6]">▼ SMART FIXER SETTINGS</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                  <label className="flex flex-col text-sm text-gray-300">
-                    Chaining Strategy
+                    Chaining Strategy / Mode
                     <select className="bg-[#111317] border border-gray-600 rounded p-1 mt-1 text-white" value={config.smartFixer?.strategy || 'sequential'} onChange={e => dispatch({type:'UPDATE_CONFIG', payload:{smartFixer: {...(config.smartFixer||{}), strategy: e.target.value}}})}>
+                       <option value="auto">Auto (Default)</option>
                        <option value="sequential">Strict Sequential</option>
                        <option value="spatial">Spatial Topology</option>
                     </select>
+                 </label>
+                 <label className="flex flex-col text-sm text-gray-300">
+                    Line_Key Header Mapping
+                    <select className="bg-[#111317] border border-gray-600 rounded p-1 mt-1 text-white" value={config.smartFixer?.lineKeyCol || ''} onChange={e => dispatch({type:'UPDATE_CONFIG', payload:{smartFixer: {...(config.smartFixer||{}), lineKeyCol: e.target.value}}})}>
+                       <option value="">-- No Line_Key mapped --</option>
+                       {Object.keys(config.columnAliases).map(k => <option key={k} value={k}>{k}</option>)}
+                    </select>
+                 </label>
+                 <label className="flex items-center gap-2 mt-2 text-sm text-gray-300">
+                    <input type="checkbox" checked={config.smartFixer?.autoMultiPassMode ?? true} onChange={e => dispatch({type:'UPDATE_CONFIG', payload:{smartFixer: {...(config.smartFixer||{}), autoMultiPassMode: e.target.checked}}})} className="rounded" />
+                    AutoMultiPassMode (Enable PTE / Two-Pass Architecture)
                  </label>
               </div>
             </div>
@@ -2892,10 +3136,17 @@ export default function App() {
           </button>
           <button
             onClick={handleSmartFix}
-            disabled={dataTable.length === 0 || state.smartFix.status === "running"}
+            disabled={dataTable.length === 0 || state.smartFix.status === "running" || state.isPassTwoEnabled}
             className="disabled:opacity-50 bg-[#0077B6] hover:bg-blue-600 text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors"
           >
             {state.smartFix.status === "running" ? "Analyzing..." : "Smart Fix 🔧"}
+          </button>
+          <button
+            onClick={() => dispatch({type: 'AUTO_APPROVE_ALL'})}
+            disabled={state.smartFix.status !== "previewing"}
+            className="disabled:opacity-50 text-gray-300 hover:text-white px-3 py-1.5 rounded border border-gray-600 hover:bg-gray-700 flex items-center gap-2 transition-colors text-xs"
+          >
+            Auto Approve All
           </button>
           <button
             onClick={handleApplyFixes}
@@ -2904,6 +3155,15 @@ export default function App() {
           >
             {state.smartFix.status === "applying" ? "Applying..." : "Apply Fixes ✓"}
           </button>
+          {config.smartFixer?.autoMultiPassMode && (
+             <button
+                onClick={handleRunSecondPass}
+            disabled={!state.isPassTwoEnabled || state.smartFix.status === "running" || state.smartFix.status === "previewing"}
+                className="disabled:opacity-50 bg-[#6F42C1] hover:bg-purple-600 text-white px-3 py-1.5 rounded flex items-center gap-2 font-bold transition-colors"
+             >
+                🚀 Run Second Pass
+             </button>
+          )}
         </div>
       </div>
     </div>
